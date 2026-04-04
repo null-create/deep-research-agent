@@ -11,7 +11,9 @@ mcp
 ollama
 openai
 pydantic
-sentence-transformers
+# Sentence-transformers is installed separately in the Dockerfile to pre-download the embedding model and cache it in the image, 
+# avoiding cold-start latency and unauthenticated HF rate-limit throttling.  If installing locally outside Docker, run:
+# sentence-transformers
 textual
 websockets
 # torch is installed by the Dockerfile with the CPU-only index URL to avoid

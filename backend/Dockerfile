@@ -33,15 +33,21 @@ RUN pip install --no-cache-dir \
     torch==2.10.0 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# Copy requirements
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ── Pre-download embedding modellibraries and model ───────────────────────────
+# Install sentence-transformers before requirements.txt so the pre-downloaded
+# model is cached and reused
+RUN pip install --no-cache-dir sentence-transformers
 
-# ── Pre-download embedding model ──────────────────────────────────────────────
 # Bake the sentence-transformers model into the image so containers never
 # download it from HuggingFace at runtime (avoids cold-start latency and
 # unauthenticated HF rate-limit throttling).  Model is ~90 MB.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# ── Application setup ────────────────────────────────────────────────────────
+
+# Copy requirements
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY backend/ .
