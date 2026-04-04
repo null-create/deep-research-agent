@@ -1,0 +1,21 @@
+# FastMCP and core dependencies
+mcp>=1.26.0
+
+# Search backends
+ddgs>=9.0.0
+wikipedia>=1.4.0
+requests>=2.31.0
+
+# Optional but useful
+urllib3>=2.0.0
+certifi>=2023.0.0
+
+# GitHub search (optional, works without API key)
+PyGithub>=2.1.0
+
+# Academic search backends
+arxiv>=2.1.0
+
+# Additional useful libraries
+beautifulsoup4>=4.12.0
+lxml>=4.9.0

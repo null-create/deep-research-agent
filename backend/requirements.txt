@@ -1,0 +1,19 @@
+aiohttp
+anyio
+art
+asyncio
+black
+boto3
+neo4j
+httpx
+fastapi
+mcp
+ollama
+openai
+pydantic
+sentence-transformers
+textual
+websockets
+# torch is installed by the Dockerfile with the CPU-only index URL to avoid
+# pulling the 1.7 GB CUDA build.  If installing locally outside Docker, run:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu

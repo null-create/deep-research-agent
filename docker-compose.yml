@@ -1,0 +1,139 @@
+services:
+  research-assistant:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: research-assistant
+    ports:
+      - "9999:9999"
+    env_file: ./backend/.env
+    environment:
+      - LOG_DIR=/app/logs
+      # Neo4j connection for in-process long-term memory store.
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-research_pass}
+      # Output directory for auto-exported report PDFs.
+      - REPORTS_DIR=/app/data/reports
+      # In-process embedding model (~90 MB weights) + active LLM calls can push
+      # memory above 1 GB under load.  Lower MAX_TOKENS or set
+      # EMBEDDINGS_ENABLED=false to reduce peak usage.
+      # Set HF_TOKEN to avoid unauthenticated HuggingFace download throttling.
+      # - HF_TOKEN=your_token_here
+    volumes:
+      - ./backend/logs:/app/logs
+      # Auto-exported report PDFs written by the orchestrator after each session.
+      - ./data/reports:/app/data/reports
+      # Bind-mount the instructions directory so RESEARCH-METHODS.md updates
+      # written by the self-optimization pipeline persist back to the host.
+      - ./backend/instructions:/app/instructions
+      # Bind-mount docs so the /project-docs API can serve them from the container.
+      - ./docs:/app/docs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 10g
+    networks:
+      - research-network
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      mcp-file-handler-server:
+        condition: service_healthy
+      mcp-web-search-server:
+        condition: service_healthy
+      mcp-web-scraping-server:
+        condition: service_healthy
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: research-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-research_pass}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_max__size=1G
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "cypher-shell",
+          "-u",
+          "neo4j",
+          "-p",
+          "${NEO4J_PASSWORD:-research_pass}",
+          "RETURN 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  mcp-web-search-server:
+    build:
+      context: ./mcp/web_search
+      dockerfile: Dockerfile
+    ports:
+      - "9393:9393"
+    env_file: ./mcp/web_search/.env
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9393/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  mcp-web-scraping-server:
+    build:
+      context: ./mcp/web_scrape
+      dockerfile: Dockerfile
+    ports:
+      - "9292:9292"
+    env_file: ./mcp/web_scrape/.env
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9292/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  mcp-file-handler-server:
+    build:
+      context: mcp/file_handler
+      dockerfile: Dockerfile
+    ports:
+      - "9191:9191"
+    env_file: mcp/file_handler/.env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9191/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+networks:
+  research-network:
+    driver: bridge
+
+volumes:
+  data:
+  neo4j_data:

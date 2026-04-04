@@ -1,0 +1,133 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+const RECONNECT_BASE_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
+const RECONNECT_MAX_ATTEMPTS = 10;
+
+interface UseWebSocketOptions {
+  /** Called once a re-connection (not the initial connection) succeeds. */
+  onReconnected?: () => void;
+}
+
+export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
+  const [isConnected, setIsConnected] = useState(false);
+  const [messageQueue, setMessageQueue] = useState<any[]>([]);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  /** True once the first successful connection has occurred. */
+  const hasConnectedOnceRef = useRef(false);
+  /** Prevents auto-reconnect when the component intentionally closes the socket. */
+  const intentionalCloseRef = useRef(false);
+
+  const onReconnectedRef = useRef(options.onReconnected);
+  useEffect(() => {
+    onReconnectedRef.current = options.onReconnected;
+  }, [options.onReconnected]);
+
+  const scheduleReconnect = useCallback(() => {
+    if (reconnectAttemptsRef.current >= RECONNECT_MAX_ATTEMPTS) {
+      setIsReconnecting(false);
+      return;
+    }
+    const delay = Math.min(
+      RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttemptsRef.current,
+      RECONNECT_MAX_DELAY_MS
+    );
+    reconnectAttemptsRef.current += 1;
+    setIsReconnecting(true);
+    reconnectTimeoutRef.current = setTimeout(() => {
+      connectRef.current?.();
+    }, delay);
+  }, []);
+
+  // Forward declaration so scheduleReconnect can call connect before it's defined.
+  const connectRef = useRef<(() => void) | null>(null);
+
+  const connect = useCallback(() => {
+    if (reconnectTimeoutRef.current !== null) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (wsRef.current) {
+      // Mark as intentional so onclose doesn't trigger another reconnect.
+      intentionalCloseRef.current = true;
+      wsRef.current.close();
+    }
+
+    intentionalCloseRef.current = false;
+    const ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      setIsReconnecting(false);
+      reconnectAttemptsRef.current = 0;
+
+      if (hasConnectedOnceRef.current) {
+        // This is a re-connection — delay slightly before notifying the caller
+        // so the backend WebSocket handler is fully ready to process the
+        // resume message (avoids session=none on rapid reconnects).
+        setTimeout(() => {
+          onReconnectedRef.current?.();
+        }, 150);
+      }
+      hasConnectedOnceRef.current = true;
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setMessageQueue((prev) => [...prev, data]);
+      } catch {
+        setMessageQueue((prev) => [...prev, event.data]);
+      }
+    };
+
+    ws.onclose = () => {
+      setIsConnected(false);
+      if (!intentionalCloseRef.current) {
+        scheduleReconnect();
+      } else {
+        setIsReconnecting(false);
+      }
+    };
+
+    ws.onerror = () => {
+      // onclose fires after onerror, so reconnect logic lives there.
+      setIsConnected(false);
+    };
+
+    wsRef.current = ws;
+  }, [url, scheduleReconnect]);
+
+  connectRef.current = connect;
+
+  /** Manually trigger an immediate reconnection attempt. */
+  const reconnect = useCallback(() => {
+    reconnectAttemptsRef.current = 0;
+    connect();
+  }, [connect]);
+
+  const sendMessage = useCallback((message: any) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(message));
+    }
+  }, []);
+
+  const clearMessageQueue = useCallback(() => setMessageQueue([]), []);
+
+  useEffect(() => {
+    connect();
+    return () => {
+      intentionalCloseRef.current = true;
+      if (reconnectTimeoutRef.current !== null) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      wsRef.current?.close();
+    };
+  }, [connect]);
+
+  return { isConnected, isReconnecting, messageQueue, clearMessageQueue, sendMessage, reconnect };
+}

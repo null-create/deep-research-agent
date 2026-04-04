@@ -1,0 +1,43 @@
+.idea
+.vscode
+.local
+.venv
+venv
+__pycache__
+*.pyc
+node_modules
+dist
+build
+*.egg-info
+.DS_Store
+*.log
+*.env
+.env
+
+# MCP data directories
+file_handler_data
+chroma_data
+
+# Backend log output — keep directory structure (.gitkeep) but ignore generated files
+backend/logs/*.ndjson
+backend/logs/*.ndjson.*
+backend/logs/*.json
+backend/logs/analytics
+backend/logs/sessions/*.json
+backend/logs/sessions/*.ndjson
+backend/logs/sessions/*.ndjson.*
+backend/logs/sessions/*.json
+
+# Terraform — never commit secrets or generated state/cache files
+infra/azure/terraform.tfvars
+infra/azure/backend.conf
+infra/azure/.terraform/
+infra/azure/.terraform.lock.hcl
+infra/azure/terraform.tfstate
+infra/azure/terraform.tfstate.backup
+infra/azure/*.tfplan
+
+# Generated reports and retrieved docs
+data/reports/*
+data/benchmarks/*
+data/documents/*

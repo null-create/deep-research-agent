@@ -1,0 +1,31 @@
+# Build context for the backend image (context = repo root).
+# Excludes directories not needed inside the backend container to keep the
+# context sent to the Docker daemon small and builds fast.
+#
+# The backend image only needs:
+#   backend/   — Python source and requirements
+#   docs/      — served by the /project-docs API endpoint
+#
+# MCP servers have their own build contexts (./mcp/*) and are unaffected.
+
+.git/
+node_modules/
+chroma_data/
+data/
+src/
+mcp/
+infra/
+scripts/
+
+# Python virtual environments and caches
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Runtime data that should not be baked into the image
+backend/logs/
+backend/.env

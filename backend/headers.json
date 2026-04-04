@@ -1,0 +1,5 @@
+{
+  "User-Agent": "research-agent/1.0",
+  "x-llm-agent": "research-agent",
+  "x-llm-application-name": "research-agent"
+}
