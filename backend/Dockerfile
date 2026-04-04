@@ -59,10 +59,8 @@ COPY docs /app/docs
 # written inside the container are immediately visible on the host.
 RUN mkdir -p /app/logs/sessions
 
-
 # Expose API port
 EXPOSE 9999
 
 # Run the API server
 CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "9999"]
-
