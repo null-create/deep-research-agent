@@ -200,6 +200,21 @@ class Config(BaseModel):
         default_factory=lambda: int(os.getenv("NEO4J_EMBEDDING_DIMENSIONS", "384"))
     )
 
+    # Half-life in days for confidence decay on RELATES_TO edges.  A
+    # relationship not re-confirmed within this window loses half its
+    # confidence.  Set to 0 to disable decay.
+    confidence_decay_half_life: int = Field(
+        default_factory=lambda: int(os.getenv("CONFIDENCE_DECAY_HALF_LIFE", "30"))
+    )
+
+    # Minimum number of new graph entities+relationships (combined) that must
+    # be written in a session before community detection is triggered at the
+    # end of synthesis.  Prevents redundant LLM calls when a session produces
+    # little new graph data.
+    graph_community_min_mutations: int = Field(
+        default_factory=lambda: int(os.getenv("GRAPH_COMMUNITY_MIN_MUTATIONS", "3"))
+    )
+
     # ───────── MCP Servers
     # Each MCP server exposes tools over the Model Context Protocol.  The URL
     # must point to the server's /mcp endpoint.  Optional API keys are forwarded

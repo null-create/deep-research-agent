@@ -18,7 +18,7 @@ An AI-powered deep research system built on a hierarchical multi-agent architect
 
 - Parallel step execution: same-group steps dispatched concurrently; `MAX_WORKERS=10` semaphore gates concurrent execution
 - In-process RAG: `SearchResultStore` with sentence-transformer embeddings (cosine ranking) scoped per session
-- In-process long-term memory: `AsyncLongTermMemory` persists cross-session findings to Neo4j (graph database). Two layers: flat vector store (Neo4j vector indexes) for raw evidence + `KnowledgeGraph` (GraphRAG) layer for entities, relationships, and community clusters stored as native graph nodes and edges. Graph context is recalled during planning and updated post-synthesis.
+- In-process long-term memory: `AsyncLongTermMemory` persists cross-session findings to Neo4j (graph database). Two layers: flat vector store (Neo4j vector indexes) for raw evidence + `KnowledgeGraph` (GraphRAG) layer for typed entities, directed triples with confidence scores, and LLM-generated community clusters. Relationships are deduplicated and include temporal tracking (`last_confirmed`, `confirmation_count`). Supports hierarchy (`IS_A`), contradiction (`CONTRADICTS`), and provenance (`SOURCED_FROM → Source`) edges. Graph context is recalled during planning; communities are updated post-synthesis only when enough new facts have landed (`GRAPH_COMMUNITY_MIN_MUTATIONS`); confidence is decayed over time (`CONFIDENCE_DECAY_HALF_LIFE`). A `prune()` method archives stale low-confidence relationships and orphaned entities.
 - Self-optimization mode: agent reads session logs and the knowledge graph, then updates its own research playbook (`backend/instructions/RESEARCH-METHODS.md`)
 - MCP servers: UA rotation, per-domain rate limiting (2s), concurrency cap (3), 429 retry, 50KB output cap
 
@@ -118,6 +118,8 @@ SEARCH_BACKEND=duckduckgo            # duckduckgo | brave | serper | google
 # NEO4J_USER=neo4j
 # NEO4J_PASSWORD=research_pass
 # NEO4J_DATABASE=neo4j
+# CONFIDENCE_DECAY_HALF_LIFE=30      # days; controls exponential confidence decay on graph edges
+# GRAPH_COMMUNITY_MIN_MUTATIONS=3   # min new entities+rels before community re-detection runs
 
 # ── Tuning (optional — defaults shown) ───────────────────────
 # MAX_ITERATIONS=3
@@ -151,7 +153,7 @@ See [docs/API_SERVER.md](docs/API_SERVER.md) for the full environment variable r
 Long-term memory is handled in-process by `backend/long_term_memory.py`, backed by Neo4j. It has two layers:
 
 - **Flat store** (`:Memory` nodes with vector index): raw evidence and claims, recalled via cosine similarity over Neo4j vector indexes.
-- **Knowledge graph** (`:Entity`, `:Community` nodes + `:RELATES_TO`, `:MEMBER_OF` edges): named entities with dedup, directed triples with confidence scores, and LLM-generated community cluster summaries. Entities are extracted from analyst findings after each research step; communities are updated post-synthesis.
+- **Knowledge graph**: typed nodes (`:Entity`, `:Community`, `:Source`) and edges (`:RELATES_TO`, `:IS_A`, `:CONTRADICTS`, `:SOURCED_FROM`, `:MEMBER_OF`). Features: relationship deduplication with merge-on-conflict, temporal tracking, hierarchy traversal, contradiction detection, URL-level provenance, cross-session path finding, confidence decay, and graph pruning. Nine REST endpoints under `/graph/` expose the graph for external inspection and maintenance.
 
 There is no separate memory MCP server.
 

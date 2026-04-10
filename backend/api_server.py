@@ -814,6 +814,170 @@ async def update_config(request: Request, config_update: ConfigUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Graph inspection endpoints ────────────────────────────────────────────────
+
+
+def _get_ltm(request: Request):
+    """Return the live long-term memory instance or raise 503."""
+    ltm = getattr(request.app.state, "long_term_memory", None)
+    if ltm is None or not ltm.graph.available:
+        raise HTTPException(status_code=503, detail="Knowledge graph not available")
+    return ltm
+
+
+@app.get("/graph/stats")
+async def graph_stats(request: Request):
+    """Return entity/relationship/community/contradiction counts."""
+    ltm = _get_ltm(request)
+    return {"stats": await ltm.graph.stats()}
+
+
+@app.get("/graph/entities")
+async def graph_entities(
+    request: Request,
+    query: str = "",
+    limit: int = 10,
+    include_hierarchy: bool = False,
+):
+    """Semantic entity search.  Returns up to *limit* entities closest to *query*."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    ltm = _get_ltm(request)
+    if query:
+        entities = await ltm.graph.find_entities(
+            query, limit=limit, include_hierarchy=include_hierarchy
+        )
+    else:
+        entities = await ltm.graph.recent_entities(limit=limit)
+    return {"entities": entities}
+
+
+@app.get("/graph/relationships")
+async def graph_relationships(
+    request: Request,
+    entity: str = "",
+    max_hops: int = 2,
+    min_confidence: float = 0.0,
+):
+    """Return relationships reachable from *entity* within *max_hops* hops."""
+    if max_hops < 1 or max_hops > 4:
+        raise HTTPException(status_code=422, detail="max_hops must be between 1 and 4")
+    ltm = _get_ltm(request)
+    relationships = await ltm.graph.get_relationships(
+        entity_names=[entity] if entity else None, max_hops=max_hops
+    )
+    if min_confidence > 0.0:
+        relationships = [
+            r for r in relationships if r.get("confidence", 1.0) >= min_confidence
+        ]
+    return {"relationships": relationships}
+
+
+@app.get("/graph/communities")
+async def graph_communities(request: Request):
+    """List all community summaries."""
+    ltm = _get_ltm(request)
+    communities = await ltm.graph.get_communities()
+    return {"communities": communities}
+
+
+@app.get("/graph/contradictions")
+async def graph_contradictions(
+    request: Request,
+    entity: str = "",
+    limit: int = 20,
+):
+    """Return contradiction edges, optionally filtered to a named entity."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be 1-100")
+    ltm = _get_ltm(request)
+    contradictions = await ltm.graph.find_contradictions(
+        entity_names=[entity] if entity else None, limit=limit
+    )
+    return {"contradictions": contradictions}
+
+
+@app.get("/graph/provenance")
+async def graph_provenance(
+    request: Request,
+    entity: str = "",
+):
+    """Return source provenance chain for the named entity (or all entities)."""
+    ltm = _get_ltm(request)
+    provenance = await ltm.graph.get_provenance(
+        entity_names=[entity] if entity else None
+    )
+    return {"provenance": provenance}
+
+
+@app.get("/graph/paths")
+async def graph_paths(
+    request: Request,
+    source: str,
+    target: str,
+    max_depth: int = 4,
+):
+    """Find shortest paths between two named entities."""
+    if not source or not target:
+        raise HTTPException(
+            status_code=422, detail="Both 'source' and 'target' are required"
+        )
+    ltm = _get_ltm(request)
+    paths = await ltm.graph.find_paths(source, target, max_depth=max_depth)
+    return {"paths": paths}
+
+
+@app.get("/graph/session/{session_id}")
+async def graph_session_diff(request: Request, session_id: str):
+    """Return entities and relationships created during a specific research session."""
+    ltm = _get_ltm(request)
+    diff = await ltm.graph.session_diff(session_id)
+    return {"session_id": session_id, **diff}
+
+
+@app.post("/graph/prune")
+async def graph_prune(
+    request: Request,
+    min_confidence: float = 0.1,
+    max_age_days: int = 180,
+    dry_run: bool = True,
+):
+    """
+    Prune stale graph elements.
+
+    By default runs in dry-run mode and returns counts of what *would* be
+    deleted.  Set ``dry_run=false`` to execute the deletes.
+
+    Query parameters
+    ----------------
+    min_confidence : float, default 0.1
+        Remove RELATES_TO edges whose confidence has fallen below this value.
+    max_age_days : int, default 180
+        Remove RELATES_TO edges not confirmed in more than this many days.
+    dry_run : bool, default true
+        When true, only count — do not delete.
+    """
+    ltm = _get_ltm(request)
+    result = await ltm.graph.prune(
+        min_confidence=min_confidence,
+        max_age_days=max_age_days,
+        dry_run=dry_run,
+    )
+    return {
+        "dry_run": dry_run,
+        "pruned": result,
+        "message": (
+            f"Would delete: {result['relationships']} relationships, "
+            f"{result['entities']} orphaned entities, "
+            f"{result['contradictions']} dangling contradictions."
+            if dry_run
+            else f"Deleted: {result['relationships']} relationships, "
+            f"{result['entities']} orphaned entities, "
+            f"{result['contradictions']} dangling contradictions."
+        ),
+    }
+
+
 # ── Chat endpoint ──────────────────────────────────────────────────────────────
 @app.post("/chat")
 async def chat_endpoint(

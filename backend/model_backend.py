@@ -23,6 +23,7 @@ if not os.path.exists(HEADERS_FILE):
     DEFAULT_HEADERS = {
         "User-Agent": "research-agent/1.0",
         "x-llm-agent": "research-agent",
+        "x-llm-application-name": "research-agent",
     }
 else:
     with open(HEADERS_FILE, "r") as f:

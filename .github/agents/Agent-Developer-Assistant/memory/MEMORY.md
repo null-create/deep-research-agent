@@ -1,5 +1,20 @@
 # Agent Memory — Research Assistant
 
+## 2026-04-10 (Knowledge Graph Phase 1–5 Enhancement + Graph Pruning)
+
+- **Phase 1 — Core primitives**: Added `Source` node type (url, title, credibility_score uniqueness constraint on `url`). Temporal props (`last_confirmed`, `confirmation_count`) on both Entity nodes and RELATES_TO edges. `stats()` now returns 6 keys (entities, relationships, communities, contradictions, sources, hierarchies).
+- **Phase 2 — New relationship types**: `IS_A` (hierarchy), `CONTRADICTS` (between entities with linked rel references), `SOURCED_FROM` (entity → Source). 13 new async KG methods: `store_hierarchy`, `store_contradiction`, `find_contradictions`, `store_source`, `link_to_source`, `get_provenance`, `recent_entities`, `recent_relationships`, `session_diff`, `find_paths`, `find_common_neighbors`, `decay_confidence`, `prune`.
+- **`store_relationship()` now deduplicates**: queries for existing (source, target, relation_type) triple; if found: merges (max confidence, appended evidence, incremented confirmation_count, returns `merged: True`); new edges get `confirmation_count: 1`.
+- **`find_entities()` gains `include_hierarchy` param**: `OPTIONAL MATCH (node)-[:IS_A*1..3]->(anc)` returns `ancestors` list.
+- **`recall_graph_context()` enhanced**: `min_confidence`, `include_contradictions`, `include_provenance` params; optional KNOWN CONTRADICTIONS + SOURCE PROVENANCE sections.
+- **`prune(min_confidence, max_age_days, dry_run=True)`**: 3-pass: stale RELATES_TO → orphan Entity nodes → dangling CONTRADICTS. Safe default `dry_run=True`.
+- **`decay_confidence(half_life_days=30)`**: Batch Cypher `exp(-0.693 * days_old / half_life)`, floor at 0.01.
+- **Phase 3 — Orchestrator integration**: `_graph_mutations_since_community_update` counter; dynamic entity_limit in `_recall_memories` (based on `graph.stats()` entity count); enriched extraction prompt requests `parent_type`, `source_url`, `contradicts_prior`; context injection via `recall_graph_context` before each extraction; IS_A + provenance wiring post-store; smart community gate (only runs if `mutations >= config.graph_community_min_mutations`); `decay_confidence` called post-synthesis.
+- **Config**: Two new fields: `confidence_decay_half_life` (default 30), `graph_community_min_mutations` (default 3).
+- **Phase 4 — API endpoints**: 9 new `/graph/*` REST endpoints in `api_server.py` (stats, entities, relationships, communities, contradictions, provenance, paths, session/{id}, prune). `POST /graph/prune` is destructive; all others are GET.
+- **Phase 5 — Smoke tests**: 9 new test functions (all static). All 57 tests pass.
+- **CRITICAL neo4j driver 5.x pattern**: When Cypher returns a relationship object and `.data()` is called, neo4j driver 5.x serializes it as a 4-tuple `(start_id, end_id, type_name, properties_dict)` — NOT a dict. `rec["rel"].get(...)` will raise `'tuple' object has no attribute 'get'`. **Always extract relationship properties by name in Cypher** (`rel.prop AS prop`) instead of `RETURN rel`. This applies to any query where a relationship edge is returned as a bare column.
+
 ## 2026-04-01 (ChromaDB → Neo4j Migration)
 
 - **Full migration of `long_term_memory.py` from ChromaDB to Neo4j.** All ChromaDB internals replaced with Neo4j async driver (`AsyncGraphDatabase`). Public API (`AsyncLongTermMemory` class + `KnowledgeGraph`) preserved — callers unchanged except constructor args.

@@ -1578,6 +1578,337 @@ def test_synthesis_step_detection():
     )
 
 
+# ── Enhanced Knowledge Graph smoke tests ─────────────────────────────────────
+
+
+def test_knowledge_graph_enhanced_schema():
+    """Verify _create_schema creates the Source constraint and that temporal
+    properties are written on entity creation/update."""
+    import ast
+
+    with open("long_term_memory.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    # Find _create_schema inside AsyncLongTermMemory
+    ltm_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "AsyncLongTermMemory"
+    )
+    schema_method = next(
+        n
+        for n in ast.walk(ltm_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_create_schema"
+    )
+    schema_src = ast.get_source_segment(src, schema_method) or ""
+    assert (
+        "source_url" in schema_src
+    ), "_create_schema must add Source node uniqueness constraint on url"
+
+    # Verify temporal props are included in upsert_entity
+    kg_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "KnowledgeGraph"
+    )
+    upsert_method = next(
+        n
+        for n in ast.walk(kg_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "upsert_entity"
+    )
+    upsert_src = ast.get_source_segment(src, upsert_method) or ""
+    assert (
+        "last_confirmed" in upsert_src
+    ), "upsert_entity must write last_confirmed on both create and merge paths"
+    assert (
+        "confirmation_count" in upsert_src
+    ), "upsert_entity must write confirmation_count on both create and merge paths"
+    print(
+        "✅ Enhanced schema: Source constraint + temporal properties in upsert_entity"
+    )
+
+
+def test_knowledge_graph_new_methods():
+    """Verify all new KnowledgeGraph methods exist."""
+    import ast
+
+    with open("long_term_memory.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    kg_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "KnowledgeGraph"
+    )
+    found = {n.name for n in ast.walk(kg_class) if isinstance(n, ast.AsyncFunctionDef)}
+
+    new_methods = [
+        "store_hierarchy",
+        "store_contradiction",
+        "find_contradictions",
+        "store_source",
+        "link_to_source",
+        "get_provenance",
+        "recent_entities",
+        "recent_relationships",
+        "session_diff",
+        "find_paths",
+        "find_common_neighbors",
+        "decay_confidence",
+        "prune",
+    ]
+    missing = [m for m in new_methods if m not in found]
+    assert not missing, f"KnowledgeGraph is missing new methods: {missing}"
+    print(f"✅ KnowledgeGraph has all {len(new_methods)} new methods")
+
+
+def test_relationship_dedup_in_store():
+    """Verify store_relationship contains deduplication logic (exact-match triple check)."""
+    import ast
+
+    with open("long_term_memory.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    kg_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "KnowledgeGraph"
+    )
+    store_rel = next(
+        n
+        for n in ast.walk(kg_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "store_relationship"
+    )
+    store_src = ast.get_source_segment(src, store_rel) or ""
+
+    assert (
+        "confirmation_count" in store_src
+    ), "store_relationship must track confirmation_count for dedup merges"
+    assert (
+        "last_confirmed" in store_src
+    ), "store_relationship must set last_confirmed on both create and merge paths"
+    # Dedup check queries for existing triple
+    assert (
+        "relation_type" in store_src and "WHERE" in store_src
+    ), "store_relationship must query for existing triple before creating"
+    assert (
+        '"merged"' in store_src or "'merged'" in store_src
+    ), "store_relationship must return 'merged' flag in its result dict"
+    print("✅ store_relationship has deduplication with confirmation tracking")
+
+
+def test_prune_method_dry_run():
+    """Verify prune() has three passes (relationships, orphans, contradictions) and
+    a dry_run parameter that defaults to True."""
+    import ast, inspect
+
+    with open("long_term_memory.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    kg_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "KnowledgeGraph"
+    )
+    prune_method = next(
+        n
+        for n in ast.walk(kg_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "prune"
+    )
+
+    # Check dry_run default = True
+    defaults = prune_method.args.defaults
+    kwdefaults = prune_method.args.kw_defaults
+    # dry_run should be a keyword argument with default True
+    prune_src = ast.get_source_segment(src, prune_method) or ""
+    assert "dry_run" in prune_src, "prune() must have a dry_run parameter"
+    assert (
+        "dry_run: bool = True" in prune_src
+    ), "prune() dry_run must default to True (safe by default)"
+
+    # Three pruning passes
+    assert "RELATES_TO" in prune_src, "Pass 1: must prune RELATES_TO edges"
+    assert (
+        "orphan" in prune_src.lower() or "NOT (e)-" in prune_src
+    ), "Pass 2: must prune orphaned entities"
+    assert "CONTRADICTS" in prune_src, "Pass 3: must prune dangling CONTRADICTS edges"
+    print("✅ prune() has dry_run=True default + three-pass pruning strategy")
+
+
+def test_orchestrator_graph_mutation_counter():
+    """Verify Orchestrator tracks _graph_mutations_since_community_update."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+
+    # Counter must be initialised in __init__
+    init_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    )
+    init_src = ast.get_source_segment(src, init_method) or ""
+    assert (
+        "_graph_mutations_since_community_update" in init_src
+    ), "Orchestrator.__init__ must initialise _graph_mutations_since_community_update"
+
+    # Counter must be incremented in _extract_graph_triples
+    extract_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_extract_graph_triples"
+    )
+    extract_src = ast.get_source_segment(src, extract_method) or ""
+    assert (
+        "_graph_mutations_since_community_update" in extract_src
+    ), "_extract_graph_triples must increment the mutation counter"
+
+    # synthesize() must gate community update on the counter
+    synth_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "synthesize"
+    )
+    synth_src = ast.get_source_segment(src, synth_method) or ""
+    assert (
+        "_graph_mutations_since_community_update" in synth_src
+    ), "synthesize() must check _graph_mutations_since_community_update before community update"
+    print(
+        "✅ Orchestrator: mutation counter init'd, incremented, and checked in synthesize()"
+    )
+
+
+def test_orchestrator_enhanced_extraction_prompt():
+    """Verify _extract_graph_triples prompt requests parent_type, source_url,
+    and injects existing graph context for contradiction detection."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    extract_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_extract_graph_triples"
+    )
+    extract_src = ast.get_source_segment(src, extract_method) or ""
+
+    assert (
+        "parent_type" in extract_src
+    ), "_extract_graph_triples prompt must request parent_type for IS_A hierarchy"
+    assert (
+        "source_url" in extract_src
+    ), "_extract_graph_triples prompt must request source_url for provenance"
+    assert (
+        "store_hierarchy" in extract_src
+    ), "_extract_graph_triples must call store_hierarchy when parent_type is provided"
+    assert (
+        "store_source" in extract_src
+    ), "_extract_graph_triples must call store_source when source_url is provided"
+    assert (
+        "recall_graph_context" in extract_src
+    ), "_extract_graph_triples must inject existing graph context into the prompt"
+    print(
+        "✅ _extract_graph_triples: enhanced prompt + IS_A hierarchy + provenance + context injection"
+    )
+
+
+def test_orchestrator_confidence_decay_post_synthesis():
+    """Verify synthesize() calls graph.decay_confidence after community detection."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    synth_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "synthesize"
+    )
+    synth_src = ast.get_source_segment(src, synth_method) or ""
+
+    assert (
+        "decay_confidence" in synth_src
+    ), "synthesize() must call graph.decay_confidence post-synthesis to age unconfirmed facts"
+    assert (
+        "confidence_decay_half_life" in synth_src
+    ), "synthesize() must read confidence_decay_half_life from config"
+    print("✅ synthesize() calls decay_confidence with config half-life")
+
+
+def test_graph_api_endpoints_exist():
+    """Verify api_server.py exposes all required /graph/* endpoints."""
+    with open("api_server.py") as f:
+        src = f.read()
+
+    required = [
+        '"/graph/stats"',
+        '"/graph/entities"',
+        '"/graph/relationships"',
+        '"/graph/communities"',
+        '"/graph/contradictions"',
+        '"/graph/provenance"',
+        '"/graph/paths"',
+        '"/graph/session/{session_id}"',
+        '"/graph/prune"',
+    ]
+    missing = [r for r in required if r not in src]
+    assert not missing, f"api_server.py missing graph endpoints: {missing}"
+    # prune must be POST (destructive)
+    assert (
+        '@app.post("/graph/prune")' in src
+    ), "POST /graph/prune must use @app.post (destructive operation)"
+    print(f"✅ api_server.py exposes all {len(required)} /graph/* endpoints")
+
+
+def test_config_graph_options():
+    """Verify config.py has new graph-related fields."""
+    import ast
+
+    with open("config.py") as f:
+        src = f.read()
+
+    assert (
+        "confidence_decay_half_life" in src
+    ), "config.py must define confidence_decay_half_life field"
+    assert (
+        "CONFIDENCE_DECAY_HALF_LIFE" in src
+    ), "confidence_decay_half_life must read from CONFIDENCE_DECAY_HALF_LIFE env var"
+    assert (
+        "graph_community_min_mutations" in src
+    ), "config.py must define graph_community_min_mutations field"
+    assert (
+        "GRAPH_COMMUNITY_MIN_MUTATIONS" in src
+    ), "graph_community_min_mutations must read from GRAPH_COMMUNITY_MIN_MUTATIONS env var"
+    print(
+        "✅ config.py: confidence_decay_half_life + graph_community_min_mutations defined"
+    )
+
+
 if __name__ == "__main__":
     errors = []
 
@@ -1608,6 +1939,16 @@ if __name__ == "__main__":
         test_orchestrator_extract_graph_triples,
         test_orchestrator_recall_uses_graph,
         test_orchestrator_community_detection_post_synthesis,
+        # Enhanced Knowledge Graph tests (Phase 1-4)
+        test_knowledge_graph_enhanced_schema,
+        test_knowledge_graph_new_methods,
+        test_relationship_dedup_in_store,
+        test_prune_method_dry_run,
+        test_orchestrator_graph_mutation_counter,
+        test_orchestrator_enhanced_extraction_prompt,
+        test_orchestrator_confidence_decay_post_synthesis,
+        test_graph_api_endpoints_exist,
+        test_config_graph_options,
         # GCP backend + config model selection fixes
         test_gcp_backend_converts_tool_calls,
         test_error_handler_no_double_fault,

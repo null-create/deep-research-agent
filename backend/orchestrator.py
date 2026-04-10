@@ -812,6 +812,11 @@ class Orchestrator:
         # Internal registry of live parallel-worker tasks so they can be
         # canceled atomically when the outer session task is canceled.
         self._active_tasks: List[asyncio.Task] = []
+        # Tracks entity + relationship writes since the last community-detection
+        # run.  Community update is skipped when fewer than
+        # config.graph_community_min_mutations graph elements have been added,
+        # preventing redundant LLM calls when a session adds little new data.
+        self._graph_mutations_since_community_update: int = 0
 
     # ------------------------------------------------------------------
     # Public API — mirrors the phased interface of ResearchAgent so that
@@ -2129,9 +2134,13 @@ class Orchestrator:
             logger.warning("[Orchestrator] Long-term memory persist failed: %s", exc)
 
         # ── Post-synthesis: update knowledge graph communities ────────────────
+        # Only run if enough new graph data has been written this session to
+        # justify the sequential LLM calls community detection requires.
+        _min_mutations = getattr(self.config, "graph_community_min_mutations", 3)
         if (
             self._long_term_memory is not None
             and self._long_term_memory.graph.available
+            and self._graph_mutations_since_community_update >= _min_mutations
         ):
             yield ResponseMessage(
                 type="status",
@@ -2161,8 +2170,36 @@ class Orchestrator:
                         "[Orchestrator] Updated %d knowledge graph communities.",
                         communities_updated,
                     )
+                self._graph_mutations_since_community_update = 0
             except Exception as exc:
                 logger.debug("[Orchestrator] Community detection skipped: %s", exc)
+        elif (
+            self._long_term_memory is not None
+            and self._long_term_memory.graph.available
+        ):
+            logger.debug(
+                "[Orchestrator] Community update skipped (%d mutations < threshold %d).",
+                self._graph_mutations_since_community_update,
+                _min_mutations,
+            )
+
+        # ── Post-synthesis: confidence decay ─────────────────────────────────
+        if (
+            self._long_term_memory is not None
+            and self._long_term_memory.graph.available
+        ):
+            try:
+                half_life = getattr(self.config, "confidence_decay_half_life", 30)
+                updated = await self._long_term_memory.graph.decay_confidence(
+                    half_life_days=half_life
+                )
+                if updated:
+                    logger.debug(
+                        "[Orchestrator] Confidence decay applied to %d relationships.",
+                        updated,
+                    )
+            except Exception as exc:
+                logger.debug("[Orchestrator] Confidence decay skipped: %s", exc)
 
     async def run(self, query: str) -> AsyncIterator[ResponseMessage]:
         """
@@ -3014,8 +3051,18 @@ Return ONLY a JSON object:
 
         # ── Graph-aware recall (entities + relationships + communities) ──────
         try:
+            # Scale entity_limit by graph size so larger graphs surface more
+            # context without overloading small or empty graphs.
+            graph_stats = await self._long_term_memory.graph.stats()
+            entity_count = graph_stats.get("entities", 0)
+            dynamic_entity_limit = min(15, max(5, entity_count // 20))
+
             graph_context = await self._long_term_memory.graph.recall_graph_context(
-                query, entity_limit=5, max_hops=2
+                query,
+                entity_limit=dynamic_entity_limit,
+                max_hops=2,
+                min_confidence=0.3,
+                include_contradictions=True,
             )
             if graph_context:
                 parts.append(graph_context)
@@ -3187,16 +3234,38 @@ Return ONLY a JSON object:
         if not claim_texts:
             return
 
+        # Optionally inject a brief graph context so the LLM can flag
+        # when a new claim contradicts something already in the graph.
+        existing_ctx = ""
+        try:
+            existing_ctx = await self._long_term_memory.graph.recall_graph_context(
+                step.description, entity_limit=3, max_hops=1
+            )
+        except Exception:
+            pass
+
+        graph_hint = (
+            f"\n\nExisting knowledge graph context (flag contradictions with "
+            f"the 'contradicts' field when a new finding conflicts with these):\n"
+            f"{existing_ctx}"
+            if existing_ctx
+            else ""
+        )
+
         extraction_prompt = (
             "Extract entities and relationships from these research findings.\n"
             "Return ONLY valid JSON with this exact structure:\n"
-            '{"entities": [{"name": "<entity name>", "type": "<person|organization|'
-            'technology|concept|event|location|metric>", "description": '
-            '"<one-sentence description>"}], '
-            '"relationships": [{"source": "<source entity name>", "target": '
-            '"<target entity name>", "relation": "<verb phrase describing the '
-            'relationship>", "evidence": "<brief supporting evidence>"}]}\n\n'
-            "Findings:\n" + "\n".join(f"- {c}" for c in claim_texts)
+            '{"entities": [{"name": "<entity name>", '
+            '"type": "<person|organization|technology|concept|event|location|metric>", '
+            '"description": "<one-sentence description>", '
+            '"parent_type": "<broader category name, or empty string>"}], '
+            '"relationships": [{"source": "<source entity name>", '
+            '"target": "<target entity name>", '
+            '"relation": "<verb phrase describing the relationship>", '
+            '"evidence": "<brief supporting evidence>", '
+            '"source_url": "<source URL if explicitly mentioned, or empty string>", '
+            '"contradicts_prior": false}]}\n\n'
+            "Findings:\n" + "\n".join(f"- {c}" for c in claim_texts) + graph_hint
         )
 
         try:
@@ -3242,6 +3311,19 @@ Return ONLY a JSON object:
                 )
                 if result.get("success"):
                     stored_entities += 1
+                    # Store IS_A hierarchy if the LLM provided a parent category
+                    parent_type = entity.get("parent_type", "").strip()
+                    if parent_type and parent_type.lower() != name.lower():
+                        # Ensure parent entity exists
+                        await self._long_term_memory.graph.upsert_entity(
+                            name=parent_type,
+                            entity_type="concept",
+                            description=f"Broader category: {parent_type}",
+                            session_id=session_id,
+                        )
+                        await self._long_term_memory.graph.store_hierarchy(
+                            child_name=name, parent_name=parent_type
+                        )
 
             # Store relationships
             relationships = triples.get("relationships", [])
@@ -3252,7 +3334,7 @@ Return ONLY a JSON object:
                 relation = rel.get("relation", "").strip()
                 if not source or not target or not relation:
                     continue
-                result = await self._long_term_memory.graph.store_relationship(
+                rel_result = await self._long_term_memory.graph.store_relationship(
                     source=source,
                     target=target,
                     relation=relation,
@@ -3260,10 +3342,20 @@ Return ONLY a JSON object:
                     session_id=session_id,
                     step_id=step.id,
                 )
-                if result.get("success"):
+                if rel_result.get("success"):
                     stored_rels += 1
+                    # Link to source URL if the LLM identified one
+                    source_url = rel.get("source_url", "").strip()
+                    if source_url and source_url.startswith("http"):
+                        await self._long_term_memory.graph.store_source(url=source_url)
+                        await self._long_term_memory.graph.link_to_source(
+                            entity_name=source, source_url=source_url
+                        )
 
             if stored_entities or stored_rels:
+                self._graph_mutations_since_community_update += (
+                    stored_entities + stored_rels
+                )
                 logger.debug(
                     "[Orchestrator] Graph extraction for step %d: "
                     "%d entities, %d relationships.",
