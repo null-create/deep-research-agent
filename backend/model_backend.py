@@ -4,7 +4,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncIterator
 
-from ollama import AsyncClient as OllamaAsyncClient
+from ollama import AsyncClient as OllamaAsyncClient, ChatResponse
 from openai import AsyncOpenAI, AsyncAzureOpenAI
 
 from config import Config
@@ -447,7 +447,7 @@ class OllamaBackend(ModelBackend):
         )
 
         try:
-            response = await self.client.chat(
+            response: ChatResponse = await self.client.chat(
                 model=model or self.model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
                 tools=tools or [],
@@ -460,7 +460,7 @@ class OllamaBackend(ModelBackend):
                     ToolCall(
                         name=tc.function.name,
                         description="",
-                        parameters=dict(tc.function.arguments),
+                        parameters=dict(tc.function.arguments) or {},
                     )
                     for tc in response.message.tool_calls
                 ]
