@@ -2434,6 +2434,14 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _reset_state(self) -> None:
+        """Free heavy intermediate data structures after the session is fully complete.
+
+        Called by the session cleanup path to reclaim memory from completed
+        sessions that are still held in the SessionStore (pending TTL eviction).
+        The replay_log in SessionStore retains the final serialized events so
+        reconnecting clients can still replay them; this method only clears the
+        Orchestrator's internal working buffers.
+        """
         self._pending_plan = None
         self._raw_findings = []
         self._analyst_output = None
@@ -2445,25 +2453,6 @@ class Orchestrator:
         self._active_tasks = []
         self.context = ResearchContext()
         self._search_store = SearchResultStore(self._long_term_memory)
-
-    def release_memory(self) -> None:
-        """Free heavy intermediate data structures after the session is fully complete.
-
-        Called by the session cleanup path to reclaim memory from completed
-        sessions that are still held in the SessionStore (pending TTL eviction).
-        The replay_log in SessionStore retains the final serialized events so
-        reconnecting clients can still replay them; this method only clears the
-        Orchestrator's internal working buffers.
-        """
-        self._raw_findings = []
-        self._analyst_output = None
-        self._contradictions = []
-        self._step_sources = {}
-        self._step_summaries = {}
-        self._analyst_recommendations = []
-        self._active_tasks = []
-        self._search_store = SearchResultStore(self._long_term_memory)
-        self.context = ResearchContext()
 
     # ── Prompt builders ─────────────────────────────────────────────────────
 
