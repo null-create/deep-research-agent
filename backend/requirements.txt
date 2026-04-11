@@ -6,6 +6,7 @@ asyncio
 black
 boto3
 neo4j
+fpdf2
 fastapi
 httpx
 huggingface_hub
