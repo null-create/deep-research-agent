@@ -2467,7 +2467,8 @@ class Orchestrator:
 
     # ── Prompt builders ─────────────────────────────────────────────────────
 
-    def _root_system_prompt(self) -> str:
+    @staticmethod
+    def _root_system_prompt() -> str:
         base = """\
 You are the Root Orchestrator — a high-reasoning research planning agent.
 
