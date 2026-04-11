@@ -22,6 +22,8 @@ services:
       # - HF_TOKEN=your_token_here
     volumes:
       - ./backend/logs:/app/logs
+      # Persisted configs
+      - ./backend/configs:/app/configs
       # Auto-exported report PDFs written by the orchestrator after each session.
       - ./data/reports:/app/data/reports
       # Bind-mount the instructions directory so RESEARCH-METHODS.md updates
