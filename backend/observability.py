@@ -49,7 +49,7 @@ __all__ = ["setup_logging", "get_logger", "log_dump", "record_event"]
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_LOG_DIR = os.path.join(Path(__file__).parent, "logs")
+_DEFAULT_LOG_DIR = Path(__file__).parent / "logs"
 _SESSIONS_SUBDIR = "sessions"
 _ISO_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 _BUFFER_MAX = 10_000  # ring-buffer cap — keeps memory bounded

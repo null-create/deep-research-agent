@@ -42,7 +42,7 @@ logger = get_logger(__name__)
 _SETTINGS_FILE = Path(
     os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "config",
+        "configs",
         "model_settings.json",
     )
 )
@@ -673,7 +673,7 @@ async def get_config(cfg: Config = Depends(get_app_config)):
 @app.post("/config")
 async def update_config(request: Request, config_update: ConfigUpdate):
     """
-    Update model configuration, persist to disk, and reinitialise the
+    Update model configuration, persist to disk, and reinitialize the
     model backend + agent pool so changes take effect immediately for new
     research sessions (in-flight sessions are not affected).
     """

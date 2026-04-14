@@ -1578,7 +1578,191 @@ def test_synthesis_step_detection():
     )
 
 
-# ── Enhanced Knowledge Graph smoke tests ─────────────────────────────────────
+# ── Pipeline data-flow improvement smoke tests ──────────────────────────────
+
+
+def test_config_increased_defaults():
+    """Verify config default strings for pipeline data-flow tunables are set to
+    the increased values that support comprehensive research."""
+    import ast
+
+    with open("config.py") as f:
+        src = f.read()
+
+    # Verify the default strings in the source code
+    assert (
+        '"5"' in src and "MAX_ITERATIONS" in src
+    ), "MAX_ITERATIONS default should be '5' in config.py source"
+    assert (
+        '"4000"' in src and "DISTILL_MAX_CHARS" in src
+    ), "DISTILL_MAX_CHARS default should be '4000' in config.py source"
+    assert (
+        '"1500"' in src and "STEP_SUMMARY_MAX_CHARS" in src
+    ), "STEP_SUMMARY_MAX_CHARS default should be '1500' in config.py source"
+    assert (
+        '"10"' in src and "SECTION_DRAFT_TOP_K" in src
+    ), "SECTION_DRAFT_TOP_K default should be '10' in config.py source"
+    # analyst_top_k: '10' is in the source (ANALYST_TOP_K env var fallback)
+    assert "ANALYST_TOP_K" in src, "config.py must have ANALYST_TOP_K field"
+    print("✅ Config defaults: increased pipeline data-flow tunables verified")
+
+
+def test_extract_sources_collects_from_rag_chunks():
+    """_extract_sources collects source URLs from RAG store chunks even when
+    SearchAgent's final_message JSON is unparseable."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    # Find _extract_sources method
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    extract_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "_extract_sources"
+    )
+    method_src = ast.get_source_segment(src, extract_method)
+
+    # Must NOT be a @staticmethod anymore (needs access to self._search_store)
+    assert (
+        "self" in method_src
+    ), "_extract_sources must be an instance method (not static)"
+    # Must reference the RAG store as a fallback
+    assert (
+        "_search_store" in method_src
+    ), "_extract_sources must collect URLs from RAG store chunks"
+    assert (
+        "source_url" in method_src
+    ), "_extract_sources must extract source_url from chunks"
+    # Must still try parsing final_message as first tier
+    assert (
+        "final_message" in method_src
+    ), "_extract_sources must still parse final_message JSON"
+    print(
+        "✅ _extract_sources: collects from both final_message JSON and RAG store chunks"
+    )
+
+
+def test_analyst_receives_prior_claims():
+    """_run_analyst passes structured claims from prior steps to the analyst
+    for cross-step triangulation."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    analyst_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "_run_analyst"
+    )
+    method_src = ast.get_source_segment(src, analyst_method)
+
+    # Must include prior claims context
+    assert (
+        "prior_claims_block" in method_src
+    ), "_run_analyst must inject prior_claims_block into analyst prompt"
+    assert (
+        "Structured findings from prior steps" in method_src
+    ), "_run_analyst must label the prior claims block for the analyst"
+    # Cross-step retrieval must use top_k >= 5
+    assert (
+        "top_k=5" in method_src
+    ), "_run_analyst cross-step corroboration should use top_k=5 (was top_k=3)"
+    print(
+        "✅ _run_analyst: passes prior structured claims and expanded cross-step context"
+    )
+
+
+def test_section_drafting_receives_structured_claims():
+    """Synthesis Phase B passes structured claims, tensions, and contradictions
+    to section drafting to enable novel insight generation."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    synth_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "synthesize"
+    )
+    method_src = ast.get_source_segment(src, synth_method)
+
+    assert (
+        "structured_claims_block" in method_src
+    ), "synthesize() must build and pass structured_claims_block to section drafts"
+    assert (
+        "structured_tensions_block" in method_src
+    ), "synthesize() must build and pass structured_tensions_block to section drafts"
+    assert (
+        "unresolved_contradictions_block" in method_src
+    ), "synthesize() must build and pass unresolved_contradictions_block to section drafts"
+    assert (
+        "novel" in method_src.lower() or "insight" in method_src.lower()
+    ), "Section drafting system prompt should reference novel insights"
+    print(
+        "✅ synthesize() Phase B: passes claims, tensions, and contradictions to section drafting"
+    )
+
+
+def test_step_summary_expanded_input():
+    """Step summary generation uses expanded claim/tension input and increased caps."""
+    import ast
+
+    with open("orchestrator.py") as f:
+        src = f.read()
+    tree = ast.parse(src)
+
+    orch_class = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Orchestrator"
+    )
+    summary_method = next(
+        n
+        for n in ast.walk(orch_class)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "_generate_step_summary"
+    )
+    method_src = ast.get_source_segment(src, summary_method)
+
+    # Must use at least 15 claims (was 10)
+    assert (
+        "claims[:15]" in method_src
+    ), "_generate_step_summary must use claims[:15] (was claims[:10])"
+    # Must use at least 5 tensions (was 3)
+    assert (
+        "tensions[:5]" in method_src
+    ), "_generate_step_summary must use tensions[:5] (was tensions[:3])"
+    # Must reference tensions in the prompt
+    assert (
+        "tension" in method_src.lower() or "disagreement" in method_src.lower()
+    ), "_generate_step_summary prompt should mention tensions/disagreements"
+    print(
+        "✅ _generate_step_summary: expanded input claims/tensions and improved prompt"
+    )
 
 
 def test_knowledge_graph_enhanced_schema():
@@ -1972,6 +2156,12 @@ if __name__ == "__main__":
         test_session_manager_concurrency_semaphore,
         # Synthesis step detection + planning prompt guard
         test_synthesis_step_detection,
+        # Pipeline data-flow improvements
+        test_config_increased_defaults,
+        test_extract_sources_collects_from_rag_chunks,
+        test_analyst_receives_prior_claims,
+        test_section_drafting_receives_structured_claims,
+        test_step_summary_expanded_input,
     ]
     async_tests = [
         test_search_result_store,

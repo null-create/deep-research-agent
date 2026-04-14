@@ -84,6 +84,12 @@ For sessions researching active conflicts, breaking news events, or rapidly-evol
 
 Label all conflict-sourced claims with this adjusted tier inline. Do not apply the standard academic tier table to military casualty counts, damage assessments, or territorial claims made by parties to the conflict.
 
+### Synthetic Source Flag Before Tier Assignment
+
+When a search result originates from a domain with no established publication history, no named author attribution, or language that is unusually promotional without citation chains, flag it as **[Potentially synthetic — verify domain authority]** before applying any tier label or extracting claims. Do not cite content from such domains even as Tier 4 without a manual check confirming the domain has indexed history, an identifiable editorial standard, or cross-citation from Tier 1–3 sources.
+
+**Why this matters:** The Source Tier System classifies by source *type* but does not distinguish between an established practitioner blog and a potentially synthetic or spam domain. This extension closes that gap. When a domain is flagged (e.g., `quantumcomputer.blog`, `quantumzeitgeist.com`), treat all claims from it as `[Potentially synthetic — verify domain authority]` until verified.
+
 ---
 
 ## Knowledge Graph Consultation Rule
@@ -93,6 +99,12 @@ Before issuing the first search in any session, query the knowledge graph for en
 - Any entity with **2+ mentions** and a confirmed Tier 1–2 source relationship can be treated as a known fact for that session — do not re-search it.
 - Use graph relationships to identify which sub-topics are already well-covered (deep nodes with many relationships) versus shallow (isolated nodes with one relationship). Deprioritize well-covered sub-topics in the research plan; prioritize shallow ones.
 - Entity mention counts in the graph (e.g., a concept appearing 3× across sessions) are a signal that the topic is recurrent and likely has usable prior findings — retrieve those findings before planning new searches.
+
+### Graph Quality Threshold for Cache-Miss Fallback
+
+When a knowledge graph lookup for a research topic returns only generic concept nodes (e.g., "Research Process," "technology lifecycle," "computing advancement") with no proper nouns, named specifications, or metrics, treat the result as equivalent to a cache miss. Proceed immediately with standard first-batch broad searches without further time spent interpreting the uninformative graph result. Document the fallback inline as **[Graph lookup: uninformative — cache miss fallback applied]**.
+
+**Why this matters:** Abstract graph entities create false impressions of prior coverage and delay session planning without providing actionable signal for research step design.
 
 ### Cross-Session Synthesis Rule
 
@@ -106,7 +118,11 @@ Restrict new searches to gaps, updates since the prior session date, or contradi
 
 ### Graph Entity Creation Requirement
 
-After storing any research_finding memory with **importance ≥7**, create knowledge graph entities for all proper nouns and named metrics in that memory — including protocol names, named specifications, organization names, CVE identifiers, and download figures — with at least one typed relationship to the research topic entity. This ensures that Knowledge Graph Consultation Rule lookups return results for heavily-researched topics whose entities would otherwise be absent from the graph.
+After storing any research_finding memory with **importance ≥7**, create knowledge graph entities for all proper nouns and named metrics in that memory — including protocol names, named specifications, organization names, CVE identifiers, and download figures — with at least one typed relationship to the research topic entity.
+
+**Hard sequencing requirement:** Immediately after the memory storage tool call for any research_finding with importance ≥7, issue knowledge graph entity creation calls for all proper nouns (named frameworks, papers, hardware systems, metrics, organizations) **before executing the next research step**. The next step plan must not be written until entity creation calls have been issued. This is a hard sequencing requirement, not a soft suggestion.
+
+**Why this matters:** Named entities such as Groq LPU, Mamba-2, AlphaQubit, CrewAI, and Microsoft AutoGen v0.4 were never added to the graph despite appearing in high-importance findings, because entity creation was deferred and then skipped. This rule closes that gap.
 
 ---
 
@@ -184,6 +200,14 @@ Coverage notes feed directly into the next step's planning and are the primary m
 
 If ≥3 consecutive steps in a research plan return null results or agent refusals, halt the sequential plan and switch to a synthesis step using only the findings gathered so far. Explicitly label the synthesis as `[Partial — N of M steps completed]` and list the uncompleted steps as `[Insufficient public data — session interrupted]`. Do not attempt to synthesize from zero findings.
 
+### Universal Claim Qualification Step
+
+At the end of **every technology research session** — not only protocol or governance topics — add a dedicated closing step that explicitly asks: *"What evidence qualifies, contradicts, or limits the dominant claims established in this session?"* Issue at least two search queries targeting known failure modes, dissenting findings, or boundary conditions for the session's headline conclusions. Store the results as a research_finding memory tagged **[Qualification step]**.
+
+**Why this matters:** This generalizes the documented Contradiction-First pattern that reliably surfaced MoE routing instability, barren plateau severity, and MCP governance immaturity. The Governance Maturity Check is a specific application of this pattern; the Universal Claim Qualification Step is the general rule.
+
+> **Relationship to Governance Maturity Check:** The Governance Maturity Check (for protocol/standard topics) remains in force as a domain-specific sub-rule. The Universal Claim Qualification Step applies to all technology sessions, with the Governance Maturity Check providing additional mandatory questions when the session involves a protocol or governance body.
+
 ---
 
 ## Complexity → Step Count Heuristic
@@ -244,6 +268,8 @@ When researching any protocol, standard, or specification, include a dedicated s
 
 **Why this matters:** Governance immaturity is a Tier-1 signal that "de facto standard" claims should be qualified. In MCP research, the SEP (Specification Enhancement Proposal) governance was described as "still finding its footing" as of late 2025 — a direct qualifier on enterprise-readiness claims that would not have surfaced without an explicit governance step.
 
+> **Note:** The Governance Maturity Check is a domain-specific application of the _Universal Claim Qualification Step_ (see Step Design Patterns). Both must be applied for protocol/standard sessions.
+
 ### Wikipedia Structural Anchor Strategy
 
 For breaking or recent events, include the relevant Wikipedia article as an explicit **first-batch search target** and treat it as a structural anchor:
@@ -267,6 +293,18 @@ In any multi-actor research topic where **3 or more actors** are identified in t
 **Query framing:** `"[Actor A] vs [Actor B] strategic divergence [topic]"`
 
 **Why this matters:** Divergence findings are systematically underreported relative to alliance framing and represent disproportionately high-value signals for forecasting, risk assessment, and policy analysis. In the Iran conflict session, a dedicated US-Israel strategic divergence step surfaced the finding that Trump retreated from regime-change language and that US/Israel objectives diverged after 3 weeks — findings that would not have appeared in a step-per-actor structure that only asks what each actor wants.
+
+### Milestone vs. Projection Distinction for Hardware and Roadmap Topics
+
+For any research topic involving hardware milestones, qubit counts, benchmark scores, or vendor capability claims, explicitly categorize each finding at storage time as one of:
+
+- **[Demonstrated]** — empirically published in a peer-reviewed venue or independently replicated.
+- **[Announced]** — stated in a press release or institutional blog without independent replication.
+- **[Projected]** — a roadmap target without confirmed achievement.
+
+Do not combine these categories in synthesis statements. A projected qubit count milestone is not equivalent to a demonstrated one and must not be presented as such.
+
+**Why this matters:** Multiple quantum computing session findings conflated vendor roadmap claims with demonstrated achievements. Memory `0eb4be43` explicitly documented: "Most sources are third-party commentary or roadmap aspirations rather than announced milestones." Without explicit categorization at storage time, synthesis steps propagate projections as facts.
 
 ---
 
@@ -351,60 +389,25 @@ The memory infrastructure should be used purposefully. Apply the following rules
 - Findings from a specific research session that have no generalization value.
 - Raw evidence fragments that do not meet the minimum completeness threshold (see below).
 
+### Pre-Storage Inline Content Assertion
+
+**Before calling the memory storage tool for any raw_evidence entry**, paste the full text of the entry inline in the current plan step and confirm it contains all three of the following:
+
+1. A valid URL.
+2. A publication title.
+3. At least one complete sentence ending with a period.
+
+If the content is a JSON fragment, closes with a bracket, or ends mid-phrase, **discard it entirely — do not store it.** This is a tool-call-level gate, not a policy statement. The check must be performed at the moment of the storage call, not retroactively.
+
+**Why this gate exists:** The three-point completeness check was previously documented as a policy but enforced only by agent self-compliance. Analysis of stored memories found at least 14 raw_evidence entries that failed all three gates — including entries consisting of only a closing JSON bracket, a fragment sentence ending mid-phrase, or a search query string with no factual content. The inline assertion requirement makes the gate explicit at tool-call time.
+
 ### Minimum Completeness Threshold
 
-Do not store raw evidence fragments. Before storing any raw_evidence memory, apply a **three-point completeness gate**:
+Do not store raw evidence fragments. Before storing any raw_evidence memory, apply the **Pre-Storage Inline Content Assertion** above. If any check fails, **discard the entry rather than storing it**. A raw evidence memory that consists only of truncated JSON fragments or coverage-note tails must never be stored. If a scrape returns only a fragment, apply the Zero-Result Escalation Protocol to obtain a complete source before storing.
 
-1. Does the entry contain a **valid URL**?
-2. Does it contain a **publication title**?
-3. Does it contain **at least one complete, standalone factual claim**?
+### Malformed Finding Rejection Gate
 
-If any check fails, **discard the entry rather than storing it**. A raw evidence memory that consists only of truncated JSON fragments or coverage-note tails must never be stored. If a scrape returns only a fragment, apply the Zero-Result Escalation Protocol to obtain a complete source before storing. This gate exists to eliminate the ~18% pollution rate of truncated zero-claim fragments observed across prior sessions.
+Before storing any **research_finding memory**, verify that every primary claim in the findings list contains an inline source tier label formatted as `[Tier N]` or `[Tier — unverified]`. If any claim lacks a tier label, the memory is considered **malformed** and must not be stored until labels are added.
 
-### Duplicate Content Check
-
-Before storing any raw_evidence or research_finding memory, check existing memories for entries sharing the **same source query string** or **substantively identical content**. If a match exists, update the existing entry rather than creating a new one.
-
-Do not store a memory if an entry with the same source query or substantively identical content already exists. This prevents the documented failure pattern of 4–5 near-identical fragments from the same source being stored as separate entries, which wastes storage slots and degrades retrieval precision.
-
-### Source Tier Labeling Requirement
-
-All **research_finding memories** (importance ≥7) must include an **inline source tier label** formatted as `[Tier N]` immediately following each primary claim. Example: *"~30 CVEs discovered within 60 days [Tier 3]."*
-
-This preserves provenance across sessions so future retrievals do not require re-deriving the tier, and it prevents high-importance memories from being treated as equivalent regardless of source quality.
-
-### Authoritative URL Pinning Memory Format
-
-When a research step confirms a canonical primary source URL, store it as a **dedicated memory** with `importance: 9`, using the format:
-
-> `"[CANONICAL SOURCE] Topic: [topic]. URL: [url]. Confirmed as authoritative via: [source that confirmed it]. Date confirmed: [date]."`
-
-Do not bury canonical URLs inside multi-claim finding memories where they are difficult to retrieve.
-
-### Importance Scoring Rubric
-
-| Score | Criteria |
-|-------|----------|
-| **9–10** | Authoritative primary URL confirmed as canonical source for a niche topic; confirmed dead-end search strategies with 3 queries documented |
-| **7–8** | Multi-claim research finding with 3+ triangulated data points |
-| **5–6** | Single-claim finding, Tier 3–4 source only |
-| **1–4** | Raw evidence fragments, single-sentence notes (see minimum completeness threshold — prefer not to store at this level) |
-
-**Retention policy:** Memories older than 90 days without re-confirmation during a session should be marked for review. Memories that conflict with a newer `Accumulated Insights` entry should be pruned or updated to reference the newer entry.
-
----
-
-## Accumulated Insights
-
-> This section is populated by the self-optimization workflow based on analysis of prior research sessions.
-> Each entry is added after a self-optimization run and should be treated as a living record of what has worked.
-
-- **[2026-03-18]** Overly specific search queries (>7 words, multiple stacked qualifiers, `site:` on lightly-indexed domains) consistently return ≤1 result and waste a tool call. Short, focused queries of 3–7 words return 10 results in ~69% of cases. Breaking one long query into two short ones is always better than keeping it long. See _Query Formulation Rules_ above.
-
-- **[2026-03-18]** Do not scrape the same URL more than once per research session. Maintain a mental list of URLs you have already called `scrape_url` on. If a URL reappears in later search results that you have already scraped, skip it — the content is already in your context from the prior scrape. Re-scraping the same URL wastes a tool call and produces no new information. See _Visited URLs Scratchpad_ above for the hardened protocol.
-
-- **[2026-03-20]** Analysis of accumulated session evidence revealed five structural gaps in the methods document: absence of source quality criteria, no fallback for zero-result searches, no output formatting guidance, no step-count heuristics, and no memory storage protocol. Additionally, three emerging strategies were identified as underdocumented: verbatim claim re-search (now Pattern D), ensemble querying (now a named strategy), and terminology calibration (now a named strategy). All gaps and strategies have been integrated into the document in this optimization run. The Optimization Log was also identified as structurally disconnected from the Insights section — going forward, every Insights entry must have a corresponding Log entry added in the same operation.
-
-- **[2026-03-21]** Analysis of sessions involving contemporaneous 2026 events revealed a critical agent self-anchoring failure: the Search agent classified real events as "fictional future scenarios" due to training cutoff bias, causing step refusals rather than zero-result searches. This is qualitatively worse than a search failure because it suppresses escalation entirely. The Agent Temporal Anchoring Rule was added to prevent this. Additionally, analysis identified four underdocumented structural gaps: no knowledge graph pre-consultation rule, no gap-triggered re-search obligation, no coverage notes convention, and no partial session recovery protocol. Three emerging strategies were also formalized: concentration checks for aggregate metrics, governance maturity checks for protocol topics, and authoritative URL pinning as a dedicated memory format. Memory storage quality gaps were addressed by adding a minimum completeness threshold and an importance scoring rubric. All 11 priority actions from the session analysis have been integrated.
-
-- **[2026-03-22]** Analysis spanning MCP ecosystem memories, Iran conflict session failures, and knowledge graph structural observations identified 14 priority actions across four categories: (1) mid-session agent refusals not caught by existing protocols, (2) memory storage quality failures (18% pollution rate, duplicate fragments, missing tier labels), (3) underdocumented step design patterns (session resumption, contested quantitative claims), and (4) emerging search strategies not yet formalized (Wikipedia structural anchor, named operation anchors, actor objective divergence check, abstract concept disambiguation). All
+**Correctly formatted example:**
+> *"MoE routing instability increases in multimodal settings [Tier 2 — peer-reviewed preprint, arXiv 2024]. Expert collapse documented in 

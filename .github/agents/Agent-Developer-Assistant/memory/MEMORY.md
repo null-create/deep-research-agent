@@ -1,5 +1,18 @@
 # Agent Memory — Research Assistant
 
+## 2026-04-10 (Pipeline Data-Flow Audit — 9 Fixes for Comprehensive Research)
+
+- **Root cause of thin reports:** Traced full Search→Analyst→QA→Synthesis pipeline. Found 9 data-flow bottlenecks where information was lost or insufficiently passed between agents. All fixed.
+- **Config defaults increased:** `max_iterations` 3→5 (SearchAgent gets more tool-call loops per step), `distill_max_chars` 2000→4000 (less aggressive compression of raw tool results before RAG storage), `step_summary_max_chars` 800→1500 (outline phase sees richer step summaries), `section_draft_top_k` 6→10 (more RAG evidence per synthesis section), `analyst_top_k` 8→10 (analyst sees more step-scoped chunks).
+- **`_extract_sources()` fixed (8-session-old bug):** Was `@staticmethod` parsing only SearchAgent's `final_message` JSON — chronically empty because LLM rarely returns clean JSON. Now an instance method with two tiers: (1) parse `final_message` JSON if valid, (2) collect all unique `source_url` values from `_search_store._chunks`. REFERENCES section and source citations in reports should now populate reliably.
+- **Analyst cross-step context enriched:** Cross-step RAG retrieval `top_k` increased 3→5. **New:** Prior step structured claims and tensions now passed to each analyst as `prior_claims_block` — analysts can triangulate against curated analytical output from earlier steps, not just raw text chunks. Last 20 claims + last 5 tensions.
+- **Synthesis section drafting enriched (biggest impact):** Each section draft now receives: (a) RAG evidence chunks (increased to 10), (b) **all structured claims** from `_analyst_output`, (c) **all identified tensions** between sources, (d) **unresolved contradictions** from QA. System prompt updated to explicitly instruct novel insight generation from cross-source synthesis. Analyst fallback truncation 3000→6000 chars.
+- **Step summary generation expanded:** Input claims 10→15, tensions 3→5, notes 300→500 chars. Prompt now requests 8 bullets (was 5) and explicitly asks for tension coverage.
+- **Distillation input expanded:** Raw text fed to distillation LLM increased from 8000→12000 chars.
+- **Smoke tests: 62 total** (was 57). 5 new: `test_config_increased_defaults`, `test_extract_sources_collects_from_rag_chunks`, `test_analyst_receives_prior_claims`, `test_section_drafting_receives_structured_claims`, `test_step_summary_expanded_input`. All pass.
+- **`.env` updated:** `MAX_ITERATIONS=5` (was 3).
+- **Key insight:** The biggest single improvement is passing structured claims/tensions to section drafting. Previously, the ReportComposer only had RAG chunks (raw evidence) or truncated analyst JSON — it had to re-derive insights from scratch. Now it has direct access to curated analytical work, which is the bridge for generating novel insights.
+
 ## 2026-04-10 (Knowledge Graph Phase 1–5 Enhancement + Graph Pruning)
 
 - **Phase 1 — Core primitives**: Added `Source` node type (url, title, credibility_score uniqueness constraint on `url`). Temporal props (`last_confirmed`, `confirmation_count`) on both Entity nodes and RELATES_TO edges. `stats()` now returns 6 keys (entities, relationships, communities, contradictions, sources, hierarchies).

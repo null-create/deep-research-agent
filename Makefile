@@ -1,5 +1,5 @@
 # Convenience commands for local development and testing of the agent
-PHONY: init-backend init-frontend init clean bench run run-fe run-all restart restart-all stop stop-all
+PHONY: init-backend init-frontend init clean test bench run run-fe run-all restart restart-all stop stop-all
 
 init-backend:
 	@echo "Initializing backend..."
@@ -18,6 +18,10 @@ clean:
 	@rm -rf ./src/node_modules
 	@rm -rf ./src/dist
 	@echo "Cleanup complete!"
+
+test:
+	@echo "Running tests..."
+	@pytest -vv backend/unit_tests.py
 
 bench:
 	@echo "Running benchmarks..."

@@ -458,7 +458,7 @@ class MCPServerRegistry:
     # Path for persisting user-added (non-builtin) servers across restarts.
     _USER_SERVERS_FILE: str = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "config",
+        "configs",
         "user_mcp_servers.json",
     )
 

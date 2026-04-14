@@ -1,6 +1,7 @@
 # PROJECT-KNOWLEDGE.md — Research Assistant
 
 > Living architecture map. Load fully at session start. Update surgically when things change.
+> Updated: 2026-04-10 — Pipeline data-flow audit: 9 fixes to ensure comprehensive data passage between agents. Config defaults: `max_iterations` 3→5, `distill_max_chars` 2000→4000, `step_summary_max_chars` 800→1500, `section_draft_top_k` 6→10, `analyst_top_k` 8→10. `_extract_sources()` converted from `@staticmethod` to instance method; now collects source URLs from RAG store chunks as fallback (8-session bug fixed). `_run_analyst()` now passes prior step structured claims/tensions to each analyst via `prior_claims_block` (cross-step `top_k` 3→5). `synthesize()` Phase B now passes `structured_claims_block`, `structured_tensions_block`, and `unresolved_contradictions_block` to section drafting; system prompt updated for novel insight generation. `_generate_step_summary` uses expanded input (claims[:15], tensions[:5], notes[:500]) and 8-bullet prompt. Distillation raw text input 8000→12000. Smoke tests: 62 total.
 > Updated: 2026-04-10 — Knowledge Graph Phase 1–5 (graph pruning + full enhancement): `long_term_memory.py` gained `Source` node type (uniqueness constraint on `url`), temporal props on Entity/RELATES_TO, relationship deduplication in `store_relationship`, 13 new KG methods (store_hierarchy, store_contradiction, find_contradictions, store_source, link_to_source, get_provenance, recent_entities, recent_relationships, session_diff, find_paths, find_common_neighbors, decay_confidence, prune), enhanced `recall_graph_context` (min_confidence, include_contradictions, include_provenance), expanded `stats()` (6 keys). `orchestrator.py`: mutation counter, dynamic entity_limit, enriched extraction prompt with IS_A+provenance wiring, smart community gate, post-synthesis decay. `config.py`: `confidence_decay_half_life` (default 30) + `graph_community_min_mutations` (default 3). `api_server.py`: 9 new `/graph/*` endpoints (POST /graph/prune + 8 GETs). Smoke tests: 57 total (was 48), all pass.
 > Updated: 2026-03-25 — Synthesis step leak fix: `_root_system_prompt()` updated with `CRITICAL CONSTRAINT` prohibiting synthesis steps in the plan. `_is_synthesis_step(step)` static method added (19-phrase detection). `_run_step()` gains a synthesis guard that skips steps matching the detector, emitting `step_complete` with `skipped_synthesis: True`. `App.tsx` `step_complete` handler shows a skip message rather than "Completed step" for skipped synthesis steps. Smoke tests: 47 total.
 > Updated: 2026-04-01 — ChromaDB → Neo4j migration: `long_term_memory.py` fully rewritten to use Neo4j async driver (`AsyncGraphDatabase`). Entities, relationships, and communities are now native Neo4j graph primitives (`:Entity`, `:RELATES_TO`, `:Community`, `:MEMBER_OF`). Flat memories stored as `:Memory` nodes with vector indexes (`memory_embedding_idx`, `entity_embedding_idx`, `community_embedding_idx`). `_NoOpEmbeddingFunction` deleted. `config.py` replaces `chroma_persist_dir`/`chroma_collection_name` with `neo4j_uri`/`neo4j_user`/`neo4j_password`/`neo4j_database`/`neo4j_embedding_dimensions`. `requirements.txt`: `chromadb` → `neo4j>=5.26.0`. Docker Compose adds `neo4j:5.26-community` service (ports 7474/7687, `neo4j_data` volume). `api_server.py` and `cli.py` updated with new constructor args + `close()` on shutdown. `smoke_test.py` updated. Migration script: `scripts/migrate_chroma_to_neo4j.py`.
@@ -201,21 +202,22 @@ Prior to the 2026-03-17 fix, `setResearchEndTime` was only called on `report` an
 
 - **`SearchResultStore`** (`search_result_store.py`): per-session, per-step. Full tool results chunked and stored with cosine similarity ranking.
 - **No hard token caps** anywhere in the pipeline — RAG store with in-process ranking is the sole context management mechanism.
-- **`_DEFAULT_ANALYST_TOP_K = 8`**: chunks retrieved per analyst query.
+- **`_DEFAULT_ANALYST_TOP_K = 10`**: chunks retrieved per analyst query.
 - **`retrieve()` params**: `query`, `top_k`, `max_chars`, `step_id_filter` (only this step), `exclude_step_id` (skip this step's chunks, for cross-step retrieval), `include_superseded`.
 - **Binary detection**: `_is_binary(text)` static method checks for >10% non-printable chars. Applied to all text paths in `_extract_text()` — rejects PDF blobs and other binary scrape output silently.
 - **`_MAX_TOOL_RESULT_CHARS_IN_MESSAGE = 5000`**: max chars of a tool result kept in `SearchAgent`'s execution_messages window (full content stays in RAG store).
 - **`_MAX_SEARCH_HISTORY_MESSAGES = 8`**: sliding window size for `SearchAgent` execution_messages.
 - **`_MAX_ANALYST_FALLBACK_CHARS = 8000`**: safety-net fallback when RAG store has no chunks yet.
-- **Hierarchical distillation**: controlled by `Config` fields. `config.distill_max_chars` (default 2000) caps raw tool result text. `config.step_summary_max_chars` (default 800) caps per-step Outline summaries. `config.section_draft_top_k` (default 6) sets top-k RAG chunks per section during Section-Drafting.
+- **Hierarchical distillation**: controlled by `Config` fields. `config.distill_max_chars` (default 4000) caps raw tool result text. `config.step_summary_max_chars` (default 1500) caps per-step Outline summaries. `config.section_draft_top_k` (default 10) sets top-k RAG chunks per section during Section-Drafting.
 
-### Analyst Context Strategy (as of 2026-03-19)
+### Analyst Context Strategy (as of 2026-04-10)
 
-`_run_analyst()` builds its context from three sources in priority order:
+`_run_analyst()` builds its context from four sources in priority order:
 
 1. **Step-scoped RAG** (`step_id_filter=step.id`, top_k=config.analyst_top_k): chunks from THIS step's own searches, numbered `[Source N]`.
-2. **Cross-step corroboration** (`exclude_step_id=step.id`, top_k=3): chunks from OTHER completed steps, injected as "Corroborating evidence from prior steps". *This is the key fix for zero cross-source corroboration.*
-3. **Fallback** (if step-scoped RAG is empty): parses `sources[*].knowledge_snippet` from `final_message` JSON — explicitly excludes `coverage_notes` and `_tools_used` to avoid meta-commentary pollution.
+2. **Cross-step corroboration** (`exclude_step_id=step.id`, top_k=5): chunks from OTHER completed steps, injected as "Corroborating evidence from prior steps". *Cross-source corroboration key path.*
+3. **Prior step structured claims** (`prior_claims_block`): Last 20 claims + last 5 tensions from `_analyst_output` accumulated across prior steps. Injected as "Structured findings from prior steps" so the analyst can triangulate against curated analytical output.
+4. **Fallback** (if step-scoped RAG is empty): parses `sources[*].knowledge_snippet` from `final_message` JSON — explicitly excludes `coverage_notes` and `_tools_used` to avoid meta-commentary pollution.
 
 ### Analyst Recommendations Feedback Loop (as of 2026-03-19)
 

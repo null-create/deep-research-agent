@@ -6,13 +6,14 @@ asyncio
 black
 boto3
 neo4j
-fpdf2
 fastapi
 httpx
 huggingface_hub
 mcp
 ollama
 openai
+pytest
+pytest-asyncio
 rich
 sentence-transformers
 websockets

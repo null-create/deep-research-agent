@@ -24,7 +24,7 @@ class Config(BaseModel):
     # research step before it must return its findings.  Higher values allow
     # deeper investigation but increase latency and token spend.
     max_iterations: int = Field(
-        default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "3"))
+        default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "5"))
     )
 
     # Sampling temperature passed to the LLM.  Lower values (e.g. 0.2) produce
@@ -101,7 +101,7 @@ class Config(BaseModel):
     # The RAG store is the sole context-management mechanism — no hard character
     # caps are applied anywhere in the pipeline.
     analyst_top_k: int = Field(
-        default_factory=lambda: int(os.getenv("ANALYST_TOP_K", "8"))
+        default_factory=lambda: int(os.getenv("ANALYST_TOP_K", "10"))
     )
 
     # Maximum characters of a single tool result that are injected into the
@@ -136,7 +136,7 @@ class Config(BaseModel):
     # ~2 000 chars ≈ ~500 tokens — large enough to keep a meaningful snippet,
     # small enough to avoid context bloat before chunking into the RAG store.
     distill_max_chars: int = Field(
-        default_factory=lambda: int(os.getenv("DISTILL_MAX_CHARS", "2000"))
+        default_factory=lambda: int(os.getenv("DISTILL_MAX_CHARS", "4000"))
     )
 
     # Maximum characters for a per-step summary bullet generated after each step's
@@ -144,14 +144,14 @@ class Config(BaseModel):
     # CEO's weekly briefing) and are the sole input to the Outline Phase of
     # multi-pass synthesis.
     step_summary_max_chars: int = Field(
-        default_factory=lambda: int(os.getenv("STEP_SUMMARY_MAX_CHARS", "800"))
+        default_factory=lambda: int(os.getenv("STEP_SUMMARY_MAX_CHARS", "1500"))
     )
 
     # Number of top-k RAG chunks injected per report section during the
     # Section-Drafting phase of multi-pass synthesis.  A targeted RAG query
     # is issued per section so only relevant evidence is in context.
     section_draft_top_k: int = Field(
-        default_factory=lambda: int(os.getenv("SECTION_DRAFT_TOP_K", "6"))
+        default_factory=lambda: int(os.getenv("SECTION_DRAFT_TOP_K", "10"))
     )
 
     # ───────── Embeddings Configuration

@@ -1783,7 +1783,7 @@ class Orchestrator:
                 for sid, summary in sorted(self._step_summaries.items())
             )
             if self._step_summaries
-            else json.dumps(self._analyst_output, indent=2)[:4000]
+            else json.dumps(self._analyst_output, indent=2)[:6000]
         )
 
         outline_prompt = (
@@ -1877,6 +1877,61 @@ class Orchestrator:
 
         drafted_sections: List[Dict[str, str]] = []
 
+        # Pre-compute structured analysis context once for all section drafts.
+        # This gives the ReportComposer direct access to curated analytical
+        # work (claims, tensions, contradictions) — not just raw evidence
+        # chunks.  It's the key bridge for generating novel insights.
+        structured_claims_block = ""
+        structured_tensions_block = ""
+        if self._analyst_output:
+            claims = self._analyst_output.get("claims", [])
+            if claims:
+                claim_lines = []
+                for c in claims:
+                    ct = c.get("claim", "")
+                    conf = c.get("confidence", "")
+                    srcs = c.get("sources", [])
+                    src_str = (
+                        f" [{', '.join(srcs[:3])}]"
+                        if isinstance(srcs, list) and srcs
+                        else ""
+                    )
+                    if ct:
+                        claim_lines.append(
+                            f"- {ct}{src_str}" + (f" ({conf})" if conf else "")
+                        )
+                if claim_lines:
+                    structured_claims_block = (
+                        "Structured Research Claims (curated by analyst agents):\n"
+                        + "\n".join(claim_lines)
+                    )
+            tensions = self._analyst_output.get("tensions", [])
+            if tensions:
+                tension_lines = [
+                    f"- {t.get('topic', 'Unknown')}: "
+                    f"{t.get('position_a', '')} (from {t.get('source_a', '?')}) "
+                    f"vs {t.get('position_b', '')} (from {t.get('source_b', '?')})"
+                    for t in tensions
+                    if t.get("topic")
+                ]
+                if tension_lines:
+                    structured_tensions_block = (
+                        "Source Tensions and Disagreements (use for nuanced analysis):\n"
+                        + "\n".join(tension_lines)
+                    )
+
+        unresolved_contradictions_block = ""
+        unresolved = [c for c in self._contradictions if not c.resolved]
+        if unresolved:
+            contra_lines = [
+                f'- {c.context}: "{c.claim_a}" ({c.source_a}) vs "{c.claim_b}" ({c.source_b}) [{c.contradiction_type}]'
+                for c in unresolved[:10]
+            ]
+            unresolved_contradictions_block = (
+                "Unresolved Contradictions (acknowledge these explicitly):\n"
+                + "\n".join(contra_lines)
+            )
+
         for sec_idx, section in enumerate(sections, start=1):
             sec_title = section.get("title", f"Section {sec_idx}")
             sec_desc = section.get("description", "")
@@ -1898,10 +1953,16 @@ class Orchestrator:
                 draft_prompt_parts.append(
                     f"Evidence for this section (semantically retrieved):\n{section_evidence}"
                 )
-            else:
-                # Fallback: pull relevant subset from analyst output
+            if structured_claims_block:
+                draft_prompt_parts.append(structured_claims_block)
+            if not section_evidence and not structured_claims_block:
+                # Last-resort fallback: pull relevant subset from analyst output
                 analyst_str = json.dumps(self._analyst_output, indent=2)
-                draft_prompt_parts.append(f"Research Findings:\n{analyst_str[:3000]}")
+                draft_prompt_parts.append(f"Research Findings:\n{analyst_str[:6000]}")
+            if structured_tensions_block:
+                draft_prompt_parts.append(structured_tensions_block)
+            if unresolved_contradictions_block:
+                draft_prompt_parts.append(unresolved_contradictions_block)
             if deduped_memory:
                 draft_prompt_parts.append(
                     f"Prior Research Context (use to broaden perspective):\n{deduped_memory}"
@@ -1944,7 +2005,11 @@ class Orchestrator:
                             "You are a research report section writer. "
                             "Draft ONLY the specific section requested. "
                             "Do NOT output any other section headers or a full report structure. "
-                            "Use plain text only — no Markdown syntax."
+                            "Use plain text only — no Markdown syntax. "
+                            "You have access to raw evidence AND curated analytical claims. "
+                            "Synthesize both to produce insights that go beyond simple summarization — "
+                            "identify patterns, draw non-obvious conclusions, and connect findings "
+                            "across sources to derive new understanding."
                         ),
                     ),
                     Message(role="user", content="\n\n".join(draft_prompt_parts)),
@@ -2434,14 +2499,6 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _reset_state(self) -> None:
-        """Free heavy intermediate data structures after the session is fully complete.
-
-        Called by the session cleanup path to reclaim memory from completed
-        sessions that are still held in the SessionStore (pending TTL eviction).
-        The replay_log in SessionStore retains the final serialized events so
-        reconnecting clients can still replay them; this method only clears the
-        Orchestrator's internal working buffers.
-        """
         self._pending_plan = None
         self._raw_findings = []
         self._analyst_output = None
@@ -2454,10 +2511,28 @@ class Orchestrator:
         self.context = ResearchContext()
         self._search_store = SearchResultStore(self._long_term_memory)
 
+    def release_memory(self) -> None:
+        """Free heavy intermediate data structures after the session is fully complete.
+
+        Called by the session cleanup path to reclaim memory from completed
+        sessions that are still held in the SessionStore (pending TTL eviction).
+        The replay_log in SessionStore retains the final serialized events so
+        reconnecting clients can still replay them; this method only clears the
+        Orchestrator's internal working buffers.
+        """
+        self._raw_findings = []
+        self._analyst_output = None
+        self._contradictions = []
+        self._step_sources = {}
+        self._step_summaries = {}
+        self._analyst_recommendations = []
+        self._active_tasks = []
+        self._search_store = SearchResultStore(self._long_term_memory)
+        self.context = ResearchContext()
+
     # ── Prompt builders ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _root_system_prompt() -> str:
+    def _root_system_prompt(self) -> str:
         base = """\
 You are the Root Orchestrator — a high-reasoning research planning agent.
 
@@ -2570,25 +2645,48 @@ Return ONLY a JSON object:
             + "Compose the final research report following the required PDF-ready format."
         )
 
-    @staticmethod
-    def _extract_sources(search_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_sources(self, search_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Parse the SearchAgent's ``final_message`` JSON and return the
-        ``sources`` list.  Returns an empty list if parsing fails.
+        Collect source references from the SearchAgent's output.
+
+        Strategy (two-tier, merged + deduped):
+        1. Parse the ``final_message`` JSON for the ``sources`` list if the
+           SearchAgent returned valid JSON.
+        2. Collect unique source URLs from RAG store chunks stored during this
+           step's search phase — these are always populated regardless of how
+           the SearchAgent formats its final message.
+
+        Returns an empty list only when neither tier produces results.
         """
+        sources: List[Dict[str, Any]] = []
+        seen_urls: set = set()
+
+        # Tier 1: parse SearchAgent's structured final_message
         final_msg = search_result.get("final_message", "")
-        if not final_msg:
-            return []
-        try:
-            content = final_msg
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            data = json.loads(content)
-            return data.get("sources", [])
-        except Exception:
-            return []
+        if final_msg:
+            try:
+                content = final_msg
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+                data = json.loads(content)
+                for src in data.get("sources", []):
+                    url = src.get("url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        sources.append(src)
+            except Exception:
+                pass
+
+        # Tier 2: collect source URLs from RAG store chunks (always populated)
+        for chunk in self._search_store._chunks:
+            url = chunk.source_url
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                sources.append({"url": url, "title": url})
+
+        return sources
 
     # ── Agent dispatch helpers ───────────────────────────────────────────────
 
@@ -2871,13 +2969,53 @@ Return ONLY a JSON object:
                 search_context = "Search Results:\n" + raw_str
 
         # ── 2. Cross-step corroboration context ──────────────────────────────
-        # Retrieve top-3 chunks from OTHER completed steps so the analyst can
+        # Retrieve top-5 chunks from OTHER completed steps so the analyst can
         # triangulate claims against independently-gathered evidence.
         cross_step_context = await self._search_store.retrieve(
             query=f"{step.description} {query}",
-            top_k=3,
+            top_k=5,
             exclude_step_id=step.id,
         )
+
+        # ── 3. Structured claims from prior steps ────────────────────────────
+        # Pass curated analytical output (claims + tensions) from already-
+        # completed steps so the analyst can cross-reference against prior
+        # structured findings — not just raw text chunks.
+        prior_claims_block = ""
+        if self._analyst_output:
+            prior_claims = self._analyst_output.get("claims", [])
+            prior_tensions = self._analyst_output.get("tensions", [])
+            if prior_claims or prior_tensions:
+                parts_pc: List[str] = []
+                if prior_claims:
+                    claim_lines = []
+                    for c in prior_claims[-20:]:  # last 20 claims
+                        claim_text = c.get("claim", "")
+                        confidence = c.get("confidence", "")
+                        if claim_text:
+                            src_list = c.get("sources", [])
+                            src_str = (
+                                f" [{', '.join(src_list[:2])}]"
+                                if isinstance(src_list, list) and src_list
+                                else ""
+                            )
+                            claim_lines.append(
+                                f"- {claim_text}{src_str}"
+                                + (f" ({confidence})" if confidence else "")
+                            )
+                    if claim_lines:
+                        parts_pc.append(
+                            "Claims from prior steps:\n" + "\n".join(claim_lines)
+                        )
+                if prior_tensions:
+                    tension_lines = [
+                        f"- {t.get('topic', '')}: {t.get('position_a', '')} vs {t.get('position_b', '')}"
+                        for t in prior_tensions[-5:]
+                        if t.get("topic")
+                    ]
+                    if tension_lines:
+                        parts_pc.append("Known tensions:\n" + "\n".join(tension_lines))
+                prior_claims_block = "\n\n".join(parts_pc)
 
         prompt_parts = [
             f"Overall Research Goal: {query}",
@@ -2888,6 +3026,12 @@ Return ONLY a JSON object:
             prompt_parts.append(
                 "Corroborating evidence from prior steps "
                 "(use to cross-reference and verify claims):\n\n" + cross_step_context
+            )
+        if prior_claims_block:
+            prompt_parts.append(
+                "Structured findings from prior steps "
+                "(use to corroborate, extend, or identify conflicts with your new claims):\n\n"
+                + prior_claims_block
             )
         if extra_context:
             prompt_parts.append(f"Additional Context:\n{extra_context}")
@@ -3411,7 +3555,7 @@ Return ONLY a JSON object:
         prompt = (
             f"Sub-question / research step: {step_description}\n\n"
             f"Raw source text (may contain boilerplate, ads, navigation):\n"
-            f"{raw_text[:8000]}\n\n"
+            f"{raw_text[:12000]}\n\n"
             "TASK: Perform a relevance pass.  Extract ONLY the specific facts, "
             "numbers, quotes, and claims that directly answer the sub-question "
             "above.  Discard everything else (navigation, ads, cookie notices, "
@@ -3468,24 +3612,25 @@ Return ONLY a JSON object:
 
         fast_model = self._select_model(AgentRole.SEARCH, "summarize")
         claim_bullets = "\n".join(
-            f"- {c.get('claim', '')}" for c in claims[:10] if c.get("claim")
+            f"- {c.get('claim', '')}" for c in claims[:15] if c.get("claim")
         )
         tension_bullets = (
             "\nTensions: "
-            + "; ".join(t.get("topic", "") for t in tensions[:3] if t.get("topic"))
+            + "; ".join(t.get("topic", "") for t in tensions[:5] if t.get("topic"))
             if tensions
             else ""
         )
         input_text = f"{claim_bullets}{tension_bullets}"
         if notes:
-            input_text += f"\nNotes: {str(notes)[:300]}"
+            input_text += f"\nNotes: {str(notes)[:500]}"
 
         prompt = (
             f"Step: {step.description}\n\n"
             f"Findings:\n{input_text}\n\n"
             "Write a high-density bullet-point summary of the key facts found "
-            "in this step.  Maximum 5 bullets.  Each bullet must be a discrete, "
-            f"verifiable fact.  Maximum total length: {config.step_summary_max_chars} characters."
+            "in this step.  Maximum 8 bullets.  Each bullet must be a discrete, "
+            "verifiable fact.  Include any tensions or disagreements between sources. "
+            f"Maximum total length: {config.step_summary_max_chars} characters."
         )
         try:
             response = await self.agents.search.run(
