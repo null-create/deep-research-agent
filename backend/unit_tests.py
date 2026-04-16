@@ -472,7 +472,17 @@ class TestOrchestratorPlan:
             ]
         )
         mock_ltm.graph.recall_graph_context = AsyncMock(return_value="CO2 is rising.")
-        mock_ltm.graph.stats = AsyncMock(return_value={"entities": 5})
+        mock_ltm.graph.stats = AsyncMock(
+            return_value={
+                "entities": 5,
+                "relationships": 0,
+                "communities": 0,
+                "contradictions": 0,
+                "documents": 0,
+                "claims": 0,
+                "hierarchies": 0,
+            }
+        )
 
         mock_backend.generate = AsyncMock(
             return_value=_make_model_response(content=_plan_json())
@@ -1058,10 +1068,14 @@ class TestAsyncLongTermMemory:
             await ltm.async_init()
 
         assert ltm._available is True
-        # session.run() must have been called for each constraint + index query
-        assert (
-            session_mock.run.await_count >= 6
-        )  # 3 constraints + 3 vector indexes + 1 source
+        # session.run() must have been called for each constraint + index query.
+        # New schema: 1 Memory constraint + 1 Memory vector idx
+        #           + 7 entity type constraints + 7 entity type vector indexes
+        #           + 1 Community constraint + 1 Community vector idx
+        #           + 1 Claim constraint + 1 Claim vector idx
+        #           + 2 Document constraints + 1 Document vector idx
+        # Total = 2 + 14 + 2 + 2 + 3 = 23
+        assert session_mock.run.await_count >= 23
 
     async def test_store_unavailable_returns_failure(self):
         """When _available=False, store() must return a failure dict immediately."""
@@ -1192,7 +1206,7 @@ class TestKnowledgeGraph:
         }
         session_mock = _make_neo4j_session_mock(records=[entity_record])
         result_mock = AsyncMock()
-        result_mock.single = AsyncMock(return_value=entity_record)
+        result_mock.single = AsyncMock(return_value=None)  # No dedup match
         session_mock.run = AsyncMock(return_value=result_mock)
 
         ltm, session_mock = self._build_ltm_with_mocked_driver(session_mock)
@@ -1203,9 +1217,11 @@ class TestKnowledgeGraph:
             )
 
         called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
-        assert any("MERGE" in q or "Entity" in q for q in called_cyphers)
+        # Should CREATE a :Concept node (not :Entity)
+        assert any("Concept" in q or "CREATE" in q for q in called_cyphers)
 
     async def test_store_source_executes_merge_on_source_node(self):
+        """store_source() is deprecated and delegates to store_document(), which MERGES :Document."""
         entity_record = {
             "url": "https://example.com",
             "title": "Example",
@@ -1218,9 +1234,11 @@ class TestKnowledgeGraph:
 
         ltm, session_mock = self._build_ltm_with_mocked_driver(session_mock)
 
-        await ltm.graph.store_source(
-            "https://example.com", "Example", credibility_score=0.9
-        )
+        with patch("embeddings.EMBEDDINGS_ENABLED", False):
+            await ltm.graph.store_source(
+                "https://example.com", "Example", credibility_score=0.9
+            )
 
         called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
-        assert any("Source" in q or "MERGE" in q for q in called_cyphers)
+        # Should MERGE a :Document node (not :Source)
+        assert any("Document" in q or "MERGE" in q for q in called_cyphers)

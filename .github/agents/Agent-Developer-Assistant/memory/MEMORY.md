@@ -1,5 +1,20 @@
 # Agent Memory — Research Assistant
 
+## 2026-04-15 (Knowledge Graph Schema Redesign — Typed Nodes, Relations, Claims, Documents)
+
+- **Full rewrite of `long_term_memory.py`**: Replaced single `:Entity` node type with 7 typed Neo4j labels (`:Person`, `:Organization`, `:Technology`, `:Concept`, `:Event`, `:Location`, `:Metric`). Each type has its own uniqueness constraint, vector index, and type-specific properties (e.g., Person.affiliation, Technology.version, Metric.value+unit).
+- **Typed relationship labels**: Replaced catch-all `:RELATES_TO` with 18 typed labels (CAUSES, ENABLES, PREVENTS, REQUIRES, PART_OF, USES, PRODUCES, COMPETES_WITH, AFFILIATED_WITH, AUTHORED_BY, FUNDED_BY, PRECEDED_BY, OCCURRED_AT, ASSERTS, SUPPORTS, REFUTES, MENTIONS, RELATES_TO as fallback). `classify_relation()` maps free-form verb phrases to typed labels via compiled regex patterns — deterministic, no LLM call.
+- **`:Claim` nodes**: Individual assertions with confidence score, status (supported/disputed/unverified/retracted), linked to entities via ASSERTS edges and optionally to Documents via SUPPORTS edges. Deduplication by vector similarity.
+- **`:Document` nodes**: Subsume old `:Source` node with richer properties (url, title, content_summary, doc_type, credibility_score, domain). Unique constraint on URL. `store_source()` and `link_to_source()` preserved as deprecated wrappers.
+- **Cross-type entity dedup**: `upsert_entity()` now searches ALL entity type vector indexes via UNION ALL Cypher. When a near-duplicate exists under a different type, the more specific type wins (Person > Organization > Technology > Event > Location > Metric > Concept). Type upgrade changes the Neo4j label in-place.
+- **`_create_schema()` now creates 23 Neo4j operations**: 2 Memory + 14 entity types (7 constraints + 7 vector indexes) + 2 Community + 2 Claim + 3 Document (2 constraints + 1 vector index).
+- **`recall_graph_context()` enhanced**: Now includes CLAIMS section (up to 5 claims from top 3 seed entities). Type-specific entity details in recall output (affiliation, tech_category, maturity, date ranges, metric values). Typed relationship labels shown in KNOWN RELATIONSHIPS.
+- **Orchestrator extraction prompt expanded**: Now requests type-specific properties per entity type + explicit relationship labels from the typed vocabulary + claims array. Storage loop stores claims, documents, and link_document_to_entity.
+- **3 new API endpoints**: `GET /graph/claims`, `PATCH /graph/claims/{claim_id}`, `GET /graph/documents`. `GET /graph/entities` gains `node_type` filter parameter. Prune message includes orphaned claims count.
+- **Migration script**: `backend/migrations/migrate_entity_to_typed.py` — idempotent, dry-run by default. Converts :Entity→typed labels, :Source→:Document, reclassifies RELATES_TO edges via classify_relation().
+- **All 57 smoke tests + 122 unit tests pass.**
+- **Key pattern for dynamic Cypher in AST smoke tests**: When Cypher constraint/index names are generated dynamically (f-strings with variables), the literal strings won't appear in AST source inspection. Smoke tests must check for the loop structure or variable names rather than literal output strings.
+
 ## 2026-04-10 (Pipeline Data-Flow Audit — 9 Fixes for Comprehensive Research)
 
 - **Root cause of thin reports:** Traced full Search→Analyst→QA→Synthesis pipeline. Found 9 data-flow bottlenecks where information was lost or insufficiently passed between agents. All fixed.

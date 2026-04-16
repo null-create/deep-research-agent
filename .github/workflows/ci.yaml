@@ -5,10 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  smoke-tests:
-    name: Smoke Tests
+  CI-tests:
+    name: Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -23,8 +24,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run smoke tests
-        working-directory: backend
+      - name: Run tests
         env:
           EMBEDDINGS_ENABLED: "false"
-        run: python smoke_test.py
+        run: make test

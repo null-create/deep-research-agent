@@ -16,7 +16,7 @@
 4. [Execution Pipeline](#execution-pipeline)
    - [Phase 1 — Plan](#phase-1--plan)
    - [Phase 2 — Execute](#phase-2--execute)
-   - [Phase 3 — Synthesise](#phase-3--synthesise)
+   - [Phase 3 — Synthesize](#phase-3--synthesize)
    - [The QA Retry Loop](#the-qa-retry-loop)
 5. [Model Selection Strategy](#model-selection-strategy)
 6. [WebSocket API (`/ws/research`)](#websocket-api-wsresearch)
@@ -68,7 +68,7 @@ It is also invoked when the user requests a plan modification (`modify_plan`), r
 | `AgentRole` | `SEARCH` |
 | Typical model tier | Lighter / faster (e.g. `gpt-5-nano`, `claude-haiku`, `llama3.2`) |
 | MCP tools | Full tool access (web search, web scraper) |
-| Output shape | `{"sources": [{"url", "title", "excerpt"}], "coverage_notes": "..."}` |
+| Output shape | `{"sources": [{"url", "title", "knowledge_snippet"}], "coverage_notes": "..."}` |
 
 The SearchAgent is optimised for **high recall**. Its system prompt explicitly instructs it to:
 
@@ -131,19 +131,20 @@ A `verdict` of `"clean"` means findings passed QA and synthesis can proceed imme
 | `AgentRole` | `REPORT` |
 | Typical model tier | Highest available |
 | MCP tools | None — synthesises from vetted structured data |
-| Output shape | Well-structured Markdown document |
+| Output shape | Plain-text research document (no Markdown syntax) |
 
-The ReportComposer is the **terminal specialist**. It receives the fully aggregated, QA-approved analyst output and produces a polished research report in Markdown with five mandatory sections:
+The ReportComposer is the **terminal specialist**. It receives the fully aggregated, QA-approved analyst output and produces a polished research report in plain text with six mandatory sections:
 
 | Section | Content |
 |---|---|
 | Executive Summary | Concise overview of what was found and why it matters |
-| Key Findings | Evidence-backed claims, each linked to its source(s) |
+| Key Findings | Evidence-backed claims, each linked to its source(s) via `[N]` citations |
 | Novel Insights | Non-obvious conclusions from cross-source analysis |
-| Actionable Steps | Concrete recommendations the reader can act on |
+| Recommendations | Concrete recommendations the reader can act on |
 | Knowledge Gaps | Open questions for further research |
+| References | Numbered list of every source gathered during research |
 
-If any contradictions remain *unresolved* after QA retries, the Orchestrator passes them to the ReportComposer explicitly, which flags them in the report rather than silently omitting them.
+The system prompt explicitly prohibits Markdown syntax (no `**`, `#`, `-` list markers, code fences, or horizontal rules). All lists use numbered form (`1. 2. 3.`) and section headers are plain uppercase labels.
 
 ---
 
@@ -161,9 +162,9 @@ SubAgent
 └── run(prompt, model_override?, tools?, extra_messages?) → ModelResponse
 ```
 
-`SubAgent` is a thin, stateless wrapper. It builds the message list (`[system, ...extra, user]`), calls `model.generate()`, and returns the raw `ModelResponse`. All orchestration state lives in `Orchestrator`, not in the sub-agents.
+`SubAgent` is a thin, stateless wrapper. It builds the message list (`[system, user, ...extra]`), calls `model.generate()`, and returns the raw `ModelResponse`. All orchestration state lives in `Orchestrator`, not in the sub-agents.
 
-`AgentStatus` tracks the lifecycle of a single `run()` call: `IDLE → RUNNING → DONE | ERROR`.
+`AgentStatus` tracks the lifecycle of a single `run()` call: `IDLE → RUNNING → WAITING | DONE | ERROR`. `WAITING` is set when a sub-agent is blocked on another agent's output (e.g. inside the parallel batch executor).
 
 ---
 
@@ -267,7 +268,7 @@ flowchart TD
     NS -- yes --> SA
     NS -- no --> DONE([research_complete])
 
-    DONE --> RC["ReportComposer\nSynthesises aggregate findings\ntensions · unresolved factual contradictions"]
+    DONE --> RC["ReportComposer\nMulti-pass synthesis:\nOutline → Section drafts → Cross-ref"]
     RC --> R([Final Markdown Report])
 ```
 
@@ -290,17 +291,36 @@ This is parsed into a `ResearchPlan` (with `ResearchStep` objects at `PENDING` s
 
 ### Phase 2 — Execute
 
-`Orchestrator.execute()` iterates over `_pending_plan.steps`. For each step:
+`Orchestrator.execute()` groups `_pending_plan.steps` into **execution batches** before running them:
+
+- Steps that share the same non-`None` `parallel_group` label are dispatched **concurrently** via `asyncio.gather`. Each runs its own independent Search → Analyst → QA chain simultaneously, with a shared `PipelineRunner` semaphore capping the number of live concurrent pipelines.
+- Steps with `parallel_group=None` form singleton batches and are run **sequentially** as checkpoints between parallel groups.
+
+For each step within a batch:
 
 1. **SearchAgent** is invoked with the step description and all available MCP tools. It returns `{"sources": [...], "coverage_notes": "..."}`.
 2. **AnalystAgent** receives the SearchAgent's output and returns `{"claims": [...], "tensions": [...], "analyst_notes": "..."}`.
-3. **LoopAgent** audits the analyst output. If it returns a non-empty list of `Contradiction` objects, the [QA retry loop](#the-qa-retry-loop) kicks in.
-4. The step's analyst output is merged into `_analyst_output` (a running aggregate across all steps) using `_merge_analyst_outputs`.
-5. The step's `status` is set to `COMPLETED` and a `step_complete` event is emitted.
+3. **LoopAgent** audits the analyst output (skipped entirely in `shallow` depth). If it returns a non-empty list of `Contradiction` objects, the [QA retry loop](#the-qa-retry-loop) kicks in.
+4. A short per-step summary (`_step_summaries`) is generated from the QA-vetted analyst output. This "active context briefing" is the sole input to the Outline phase of synthesis.
+5. The step's analyst output is merged into `_analyst_output` (a running aggregate across all steps) using `_merge_analyst_outputs`.
+6. The step's `status` is set to `COMPLETED` and a `step_complete` event is emitted.
 
-### Phase 3 — Synthesise
+Duplicate step descriptions (possible when parallel batches share similar sub-questions) are deduplicated at runtime — a step whose query has already been searched by another concurrent worker is skipped with a `skipped_duplicate` flag in the event data.
 
-`Orchestrator.synthesise()` calls `ReportComposer.run()` with the full aggregated `_analyst_output` and any still-unresolved `Contradiction` objects. The response is a complete Markdown document stored in `ResearchContext` under the key `"final_report"` and emitted as a `type="report"` event.
+### Phase 3 — Synthesize
+
+`Orchestrator.synthesize()` implements a **three-phase multi-pass synthesis** pipeline:
+
+**Phase A — Outline**
+The ReportComposer reads *only* the per-step summaries stored in `_step_summaries` (the "active context briefing") and produces a structured `{"sections": [...]}` outline. Keeping this call small (summaries, not full analyst JSON) keeps the outline focused and noise-free.
+
+**Phase B — Section Drafting**
+For each section in the outline, a targeted RAG query retrieves only semantically relevant chunks from `SearchResultStore`. The model drafts that section in isolation. Each draft is emitted as a `section_draft` WebSocket event so the frontend can stream the report progressively. Structured claims, tensions, and any unresolved contradictions are injected per section as supplementary context.
+
+**Phase C — Cross-Reference Pass**
+All drafted sections are fed to the LoopAgent to detect inter-section contradictions (separate from the per-step QA that ran during `execute()`). Any flagged contradictions are appended as caveats in the final assembled document.
+
+The assembled plain-text document is stored in `ResearchContext` under the key `"final_report"` and emitted as a `type="report"` event.
 
 ### The QA Retry Loop
 
@@ -351,7 +371,7 @@ The number of retries is determined by the `research_depth` setting:
 
 **Why `source_disagreement` is handled differently:** genuine multi-perspective disagreements are research findings, not pipeline errors. Converting them to analyst tensions means they reach the ReportComposer as explicit synthesis input — the report can surface them as "experts disagree on X" rather than silently dropping them.
 
-Any `factual_error` / `temporal_mismatch` contradictions that remain unresolved after all retries are carried forward into the `synthesise()` phase and surfaced explicitly in the final report.
+Any `factual_error` / `temporal_mismatch` contradictions that remain unresolved after all retries are carried forward into the `synthesize()` phase and surfaced explicitly in the final report.
 
 ---
 
@@ -373,12 +393,14 @@ Backend-specific mappings:
 |---|---|---|
 | OpenAI | `gpt-5.2` | `gpt-5-nano` |
 | Azure OpenAI | `gpt-5.2` | `gpt-5-nano` |
-| AWS Bedrock | `claude-sonnet-4-6` | `claude-haiku-4-5` |
-| GCP Vertex AI | `gemini-2.5-pro` | `gemini-2.5-nano` |
-| Ollama | `nemotron-3-nano` | `llama3.2` |
+| AWS Bedrock | `global.anthropic.claude-sonnet-4-6` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| GCP Vertex AI | `gemini-2.5-pro` | `gemini-2.5-flash` |
+| Ollama | `nemotron-3-nano` | `llama3.2:3b` |
 | HuggingFace | *(backend default)* | *(backend default)* |
 
-Task-hint keywords also override the tier selection — if a task description includes words like `"synthesize"`, `"analyze"`, or `"report"`, the high-reasoning model is used regardless of the agent's nominal tier.
+Task-hint keywords also override the tier selection — if a task description includes words like `"synthesize"`, `"analyze"`, `"plan"`, `"report"`, or `"insight"`, the high-reasoning model is used regardless of the agent's nominal tier.
+
+Per-agent model overrides can be set via `Config` fields (`root_model_override`, `search_model_override`, `analyst_model_override`, `qa_model_override`) and take precedence over all tier defaults.
 
 ---
 
@@ -540,7 +562,7 @@ Emitted when a plan step begins execution.
 Emitted when a plan step finishes successfully (after QA passes or retries are exhausted).
 
 ```json
-{ "type": "step_complete", "message": "Step 1 complete.", "data": { "step": { ... } } }
+{ "type": "step_complete", "message": "Step 1 complete.", "data": { "step": { ... }, "tools_used": ["web_search", "web_scraper"], "qa_retries": 1, "step_summary": "Brief bullet summary of what this step found." } }
 ```
 
 #### `step_failed`
@@ -568,8 +590,10 @@ Emitted once per report section during the **Section-Drafting phase** of multi-p
   "type": "section_draft",
   "message": "Section drafted: Key Findings",
   "data": {
+    "section_index": 2,
     "section_title": "Key Findings",
-    "content": "## Key Findings\n\n..."
+    "section_content": "KEY FINDINGS\n\n1. ...",
+    "total_sections": 5
   }
 }
 ```
@@ -622,13 +646,18 @@ Client                                         Server (/ws/research)
   │◄──────────────── { type: "plan", plan: {...} } ─────│
   │                                                     │
   │── { type: "approve_plan", planId } ───────────────► │
+  │                                                     │── status: "Batch 1: running N steps in parallel…"
   │                                                     │── status: "[Search] Gathering data for step 1…"
   │                                                     │── status: "[Analyst] Extracting claims for step 1…"
   │                                                     │── status: "[QA] Auditing findings for step 1…"
   │◄── { type: "step_complete", data.step: {...} } ─────│
   │         ... (repeats for each step) ...             │
   │◄── { type: "research_complete" } ───────────────────│
-  │                                                     │── status: "[Report Composer] Synthesising…"
+  │                                                     │── status: "[Synthesis Phase A] Generating outline…"
+  │                                                     │── status: "[Synthesis Phase B] Drafting sections…"
+  │◄── { type: "section_draft", data.section_title } ───│
+  │         ... (once per section) ...                  │
+  │                                                     │── status: "[Synthesis Phase C] Cross-referencing…"
   │◄── { type: "report", data.document: "..." } ────────│
 ```
 
@@ -644,7 +673,7 @@ Client                                         Server (/ws/research)
 | **Model selection** | Task-keyword heuristic | Role-aware + task-keyword heuristic |
 | **WebSocket endpoint** | `/ws/research` (unified) | `/ws/research` (unified) |
 | **Message contract** | Baseline | Identical + `data.contradictions`, `data.unresolved` |
-| **Plan flow** | `generate_plan` → `execute_approved_plan` → `synthesize_results` | `plan` → `execute` → `synthesise` |
+| **Plan flow** | `generate_plan` → `execute_approved_plan` → `synthesize_results` | `plan` → `execute` → `synthesize` |
 | **Backend sharing** | Single backend | Per-role backends via `AgentPool` |
 | **State reset** | `_clear_state()` | `_reset_state()` |
 
@@ -677,7 +706,7 @@ from model_backend import create_model_backend, OllamaBackend, OpenAIBackend
 from orchestrator import AgentPool, Orchestrator
 
 high = OpenAIBackend(api_key="...", base_url="...", model="gpt-5.2")
-fast = OllamaBackend(model="llama3.2", base_url="http://localhost:11434")
+fast = OllamaBackend(model="llama3.2:3b", base_url="http://localhost:11434")
 
 pool = AgentPool(
     root_backend=high,

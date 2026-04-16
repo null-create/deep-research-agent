@@ -22,24 +22,41 @@ The store has two layers:
    similarity ranking via a Neo4j vector index.  Used for raw evidence
    persistence and simple semantic search.
 
-2. **Knowledge graph** (``KnowledgeGraph``): Entity and Community nodes with
-   a rich set of relationship types supporting structural recall, provenance
-   tracking, contradiction detection, and hierarchical taxonomy.
+2. **Knowledge graph** (``KnowledgeGraph``): Typed entity nodes, Claim nodes,
+   Document nodes, and Community nodes with a rich set of typed relationship
+   labels supporting structural recall, provenance tracking, contradiction
+   detection, and hierarchical taxonomy.
 
-Relationship Types
-------------------
-  RELATES_TO   — directed factual relationship between entities (primary)
+Entity Node Types (fully separate labels)
+------------------------------------------
+  Person       — people with affiliation, role, expertise_areas
+  Organization — companies/institutions with org_type, industry, headquarters
+  Technology   — tools/frameworks with tech_category, version, license, maturity
+  Concept      — abstract ideas with domain, abstraction_level
+  Event        — temporal occurrences with start_date, end_date, event_type
+  Location     — geographic entities with geo_type, parent_location
+  Metric       — quantitative data with value, unit, measurement_date, trend
+
+Additional Node Types
+---------------------
+  Memory    — raw evidence text blobs
+  Claim     — individual assertions with confidence + status + source linkage
+  Document  — research source documents (subsumes old Source node)
+  Community — LLM-summarized entity clusters
+
+Typed Relationship Labels (factual)
+------------------------------------
+  CAUSES, ENABLES, PREVENTS, REQUIRES, PART_OF, USES, PRODUCES,
+  COMPETES_WITH, AFFILIATED_WITH, AUTHORED_BY, FUNDED_BY,
+  PRECEDED_BY, OCCURRED_AT, ASSERTS, SUPPORTS, REFUTES, MENTIONS,
+  RELATES_TO (catch-all fallback)
+
+Structural Relationship Labels
+-------------------------------
   IS_A         — hierarchical taxonomy (child → parent category)
   CONTRADICTS  — flags two entities as involved in conflicting claims
-  SOURCED_FROM — entity or memory → source URL node
+  SOURCED_FROM — entity → Document node (backward compat alias for old Source)
   MEMBER_OF    — entity → community cluster
-
-Node Types
-----------
-  Memory    — raw evidence text blobs
-  Entity    — named concepts extracted from research findings
-  Community — LLM-summarized entity clusters
-  Source    — web sources (URL + title + credibility score)
 
 Public API
 ----------
@@ -51,42 +68,54 @@ Public API
 
 Graph API (via .graph attribute)
 ---------------------------------
-  graph.upsert_entity(name, entity_type, description, session_id)         → Dict
-  graph.store_relationship(source, target, relation, evidence, ...)        → Dict
-  graph.store_hierarchy(child_name, parent_name)                           → Dict
-  graph.store_contradiction(rel_id_a, rel_id_b, explanation, session_id)  → Dict
-  graph.store_source(url, title, credibility_score)                        → Dict
-  graph.link_to_source(entity_name, source_url)                            → Dict
-  graph.find_entities(query, limit, include_hierarchy)                     → List[Dict]
-  graph.find_contradictions(entity_names, limit)                           → List[Dict]
-  graph.get_relationships(entity_ids, max_hops)                            → List[Dict]
-  graph.get_communities(entity_ids)                                        → List[Dict]
-  graph.get_provenance(entity_names)                                       → List[Dict]
-  graph.recent_entities(since_date, limit)                                 → List[Dict]
-  graph.recent_relationships(since_date, limit)                            → List[Dict]
-  graph.session_diff(session_id)                                           → Dict
-  graph.find_paths(source_name, target_name, max_depth)                    → List[Dict]
-  graph.find_common_neighbors(entity_names, min_shared)                    → List[Dict]
-  graph.decay_confidence(half_life_days)                                   → int
-  graph.prune(min_confidence, max_age_days, dry_run)                       → Dict
-  graph.update_communities(summarize_fn)                                   → int
-  graph.recall_graph_context(query, entity_limit, max_hops, ...)          → str
-  graph.stats()                                                             → Dict
+  graph.upsert_entity(name, entity_type, description, session_id, properties) → Dict
+  graph.store_relationship(source, target, relation, evidence, ...,
+                           relationship_label)                                → Dict
+  graph.store_hierarchy(child_name, parent_name)                              → Dict
+  graph.store_contradiction(rel_id_a, rel_id_b, explanation, session_id)      → Dict
+  graph.store_source(url, title, credibility_score)                           → Dict  (deprecated → store_document)
+  graph.link_to_source(entity_name, source_url)                               → Dict  (deprecated → link_document_to_entity)
+  graph.store_document(url, title, content_summary, ...)                      → Dict
+  graph.find_documents(query, limit, doc_type, min_credibility)               → List[Dict]
+  graph.link_document_to_entity(document_id, entity_name, rel_label)          → Dict
+  graph.store_claim(text, confidence, status, ...)                            → Dict
+  graph.find_claims(query, limit, entity_name, status)                        → List[Dict]
+  graph.update_claim_status(claim_id, new_status)                             → Dict
+  graph.find_entities(query, limit, include_hierarchy, node_types)            → List[Dict]
+  graph.find_contradictions(entity_names, limit)                              → List[Dict]
+  graph.get_relationships(entity_ids, max_hops)                               → List[Dict]
+  graph.get_communities(entity_ids)                                           → List[Dict]
+  graph.get_provenance(entity_names)                                          → List[Dict]
+  graph.recent_entities(since_date, limit)                                    → List[Dict]
+  graph.recent_relationships(since_date, limit)                               → List[Dict]
+  graph.session_diff(session_id)                                              → Dict
+  graph.find_paths(source_name, target_name, max_depth)                       → List[Dict]
+  graph.find_common_neighbors(entity_names, min_shared)                       → List[Dict]
+  graph.decay_confidence(half_life_days)                                      → int
+  graph.prune(min_confidence, max_age_days, dry_run)                          → Dict
+  graph.update_communities(summarize_fn)                                      → int
+  graph.recall_graph_context(query, entity_limit, max_hops, ...)              → str
+  graph.stats()                                                                → Dict
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 import neo4j
 from neo4j import AsyncGraphDatabase
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 # Cosine similarity threshold above which a candidate is considered a
 # near-duplicate of an already-stored memory.
@@ -99,6 +128,216 @@ _ENTITY_DEDUP_THRESHOLD: float = 0.92
 # Minimum number of shared relationships for two entities to be grouped
 # into the same community during community detection.
 _COMMUNITY_MIN_SHARED_RELS: int = 2
+
+# ---------------------------------------------------------------------------
+# Entity type system
+# ---------------------------------------------------------------------------
+
+# Canonical entity type labels — each is a separate Neo4j node label.
+ENTITY_TYPES: Tuple[str, ...] = (
+    "Person",
+    "Organization",
+    "Technology",
+    "Concept",
+    "Event",
+    "Location",
+    "Metric",
+)
+
+# Maps the LLM's lowercase type string to the Neo4j node label.
+_TYPE_TO_LABEL: Dict[str, str] = {
+    "person": "Person",
+    "organization": "Organization",
+    "org": "Organization",
+    "technology": "Technology",
+    "tech": "Technology",
+    "concept": "Concept",
+    "event": "Event",
+    "location": "Location",
+    "metric": "Metric",
+}
+
+# Type specificity ranking — higher is more specific.  When cross-type dedup
+# detects a near-duplicate under a different type, the more specific type wins.
+_TYPE_SPECIFICITY: Dict[str, int] = {
+    "Person": 7,
+    "Organization": 6,
+    "Technology": 5,
+    "Event": 4,
+    "Location": 3,
+    "Metric": 2,
+    "Concept": 1,
+}
+
+# Vector index names for each entity type.
+_ENTITY_INDEX_NAMES: Dict[str, str] = {
+    label: f"{label.lower()}_embedding_idx" for label in ENTITY_TYPES
+}
+
+# ---------------------------------------------------------------------------
+# Typed relationship system
+# ---------------------------------------------------------------------------
+
+# Factual relationship labels (used for multi-hop traversal queries).
+_FACTUAL_REL_TYPES: Tuple[str, ...] = (
+    "CAUSES",
+    "ENABLES",
+    "PREVENTS",
+    "REQUIRES",
+    "PART_OF",
+    "USES",
+    "PRODUCES",
+    "COMPETES_WITH",
+    "AFFILIATED_WITH",
+    "AUTHORED_BY",
+    "FUNDED_BY",
+    "PRECEDED_BY",
+    "OCCURRED_AT",
+    "ASSERTS",
+    "SUPPORTS",
+    "REFUTES",
+    "MENTIONS",
+    "RELATES_TO",
+)
+
+# Cypher fragment for matching any factual relationship type.
+_FACTUAL_REL_CYPHER = "|".join(_FACTUAL_REL_TYPES)
+
+# Keyword patterns for classifying free-form verb phrases into typed labels.
+# Each tuple: (compiled regex, Neo4j relationship label).
+# Order matters — first match wins.
+_RELATION_CLASSIFIERS: List[Tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"\bcaus(es?|ed|ing)\b|\bresult(s|ed)? in\b|\bleads? to\b|\btrigger", re.I
+        ),
+        "CAUSES",
+    ),
+    (
+        re.compile(r"\benabl(es?|ed|ing)\b|\bfacilit|\ballow(s|ed)?\b|\bempower", re.I),
+        "ENABLES",
+    ),
+    (
+        re.compile(r"\bpreven(ts?|ted|ting)\b|\binhib|\bblock(s|ed)?\b|\bhindr", re.I),
+        "PREVENTS",
+    ),
+    (
+        re.compile(
+            r"\brequir(es?|ed|ing)\b|\bdepend(s|ed)? on\b|\bneeds?\b|\bnecessit", re.I
+        ),
+        "REQUIRES",
+    ),
+    (
+        re.compile(
+            r"\bpart of\b|\bcompon|\bincluded? in\b|\bsubset\b|\bcontain(s|ed)?\b", re.I
+        ),
+        "PART_OF",
+    ),
+    (
+        re.compile(
+            r"\buses?\b|\butiliz|\bemploy(s|ed)?\b|\bleverage|\bpowered by\b", re.I
+        ),
+        "USES",
+    ),
+    (
+        re.compile(
+            r"\bproduc(es?|ed|ing)\b|\bcreat(es?|ed|ing)\b|\bgenerat|\bbuil[dt]\b|\bdevelop",
+            re.I,
+        ),
+        "PRODUCES",
+    ),
+    (
+        re.compile(r"\bcompet(es?|ed|ing)\b|\brival|\balternativ|\bvs\.?\b", re.I),
+        "COMPETES_WITH",
+    ),
+    (
+        re.compile(
+            r"\baffiliat|\bmember of\b|\bworks? (at|for)\b|\bemploy(ed|ee)?\b|\bjoined?\b",
+            re.I,
+        ),
+        "AFFILIATED_WITH",
+    ),
+    (
+        re.compile(
+            r"\bauthor(ed|s)?\b|\bwrote\b|\bwritten by\b|\bpublish(ed)?\b|\bcreator\b",
+            re.I,
+        ),
+        "AUTHORED_BY",
+    ),
+    (
+        re.compile(
+            r"\bfund(ed|s|ing)?\b|\bfinanc(ed|es|ing)\b|\binvest(ed|s)?\b|\bsponsor",
+            re.I,
+        ),
+        "FUNDED_BY",
+    ),
+    (
+        re.compile(
+            r"\bpreced(ed|es|ing)?\b|\bbefore\b|\bprior to\b|\bfollow(s|ed)? by\b|\bsucce(ed|ss)",
+            re.I,
+        ),
+        "PRECEDED_BY",
+    ),
+    (
+        re.compile(
+            r"\boccur(red|s)? (at|in)\b|\blocated (at|in)\b|\bheld (at|in)\b|\btakes? place\b",
+            re.I,
+        ),
+        "OCCURRED_AT",
+    ),
+    (
+        re.compile(
+            r"\bassert(s|ed)?\b|\bclaim(s|ed)?\b|\bstat(es?|ed)\b|\bdeclar", re.I
+        ),
+        "ASSERTS",
+    ),
+    (
+        re.compile(
+            r"\bsupport(s|ed|ing)?\b|\bconfirm(s|ed)?\b|\bvalidat|\bcorroborat|\bevidence for\b",
+            re.I,
+        ),
+        "SUPPORTS",
+    ),
+    (
+        re.compile(
+            r"\brefut(es?|ed|ing)\b|\bcontradict(s|ed)?\b|\bdisprov|\bchalleng(es?|ed)\b|\bundermin",
+            re.I,
+        ),
+        "REFUTES",
+    ),
+    (
+        re.compile(
+            r"\bmention(s|ed|ing)?\b|\brefer(s|red)? to\b|\bcit(es?|ed)\b|\bnot(es?|ed)\b",
+            re.I,
+        ),
+        "MENTIONS",
+    ),
+]
+
+# Claim status values.
+CLAIM_STATUSES: Tuple[str, ...] = (
+    "supported",
+    "disputed",
+    "unverified",
+    "retracted",
+)
+
+
+def classify_relation(verb_phrase: str) -> str:
+    """Map a free-form verb phrase to a typed Neo4j relationship label.
+
+    Uses keyword matching — no LLM call, deterministic, zero latency.
+    Falls back to ``RELATES_TO`` when no pattern matches.
+    """
+    for pattern, label in _RELATION_CLASSIFIERS:
+        if pattern.search(verb_phrase):
+            return label
+    return "RELATES_TO"
+
+
+def resolve_entity_label(entity_type: str) -> str:
+    """Map LLM entity type string to Neo4j node label.  Defaults to Concept."""
+    return _TYPE_TO_LABEL.get(entity_type.lower().strip(), "Concept")
 
 
 class AsyncLongTermMemory:
@@ -176,20 +415,11 @@ class AsyncLongTermMemory:
         assert self._driver is not None
         dims = self._embedding_dimensions
         async with self._driver.session(database=self._database) as session:
-            # Uniqueness constraints
+            # ── Memory node ───────────────────────────────────────────────
             await session.run(
                 "CREATE CONSTRAINT memory_id IF NOT EXISTS "
                 "FOR (m:Memory) REQUIRE m.id IS UNIQUE"
             )
-            await session.run(
-                "CREATE CONSTRAINT entity_id IF NOT EXISTS "
-                "FOR (e:Entity) REQUIRE e.id IS UNIQUE"
-            )
-            await session.run(
-                "CREATE CONSTRAINT community_id IF NOT EXISTS "
-                "FOR (c:Community) REQUIRE c.id IS UNIQUE"
-            )
-            # Vector indexes for cosine similarity search
             await session.run(
                 "CREATE VECTOR INDEX memory_embedding_idx IF NOT EXISTS "
                 "FOR (m:Memory) ON (m.embedding) "
@@ -197,12 +427,26 @@ class AsyncLongTermMemory:
                 "`vector.similarity_function`: 'cosine'}}",
                 dims=dims,
             )
+
+            # ── Typed entity nodes ────────────────────────────────────────
+            for label in ENTITY_TYPES:
+                idx_name = _ENTITY_INDEX_NAMES[label]
+                await session.run(
+                    f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS "
+                    f"FOR (e:{label}) REQUIRE e.id IS UNIQUE"
+                )
+                await session.run(
+                    f"CREATE VECTOR INDEX {idx_name} IF NOT EXISTS "
+                    f"FOR (e:{label}) ON (e.embedding) "
+                    "OPTIONS {indexConfig: {`vector.dimensions`: $dims, "
+                    "`vector.similarity_function`: 'cosine'}}",
+                    dims=dims,
+                )
+
+            # ── Community node ────────────────────────────────────────────
             await session.run(
-                "CREATE VECTOR INDEX entity_embedding_idx IF NOT EXISTS "
-                "FOR (e:Entity) ON (e.embedding) "
-                "OPTIONS {indexConfig: {`vector.dimensions`: $dims, "
-                "`vector.similarity_function`: 'cosine'}}",
-                dims=dims,
+                "CREATE CONSTRAINT community_id IF NOT EXISTS "
+                "FOR (c:Community) REQUIRE c.id IS UNIQUE"
             )
             await session.run(
                 "CREATE VECTOR INDEX community_embedding_idx IF NOT EXISTS "
@@ -211,10 +455,35 @@ class AsyncLongTermMemory:
                 "`vector.similarity_function`: 'cosine'}}",
                 dims=dims,
             )
-            # Source provenance node constraint
+
+            # ── Claim node ────────────────────────────────────────────────
             await session.run(
-                "CREATE CONSTRAINT source_url IF NOT EXISTS "
-                "FOR (s:Source) REQUIRE s.url IS UNIQUE"
+                "CREATE CONSTRAINT claim_id IF NOT EXISTS "
+                "FOR (cl:Claim) REQUIRE cl.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE VECTOR INDEX claim_embedding_idx IF NOT EXISTS "
+                "FOR (cl:Claim) ON (cl.embedding) "
+                "OPTIONS {indexConfig: {`vector.dimensions`: $dims, "
+                "`vector.similarity_function`: 'cosine'}}",
+                dims=dims,
+            )
+
+            # ── Document node (subsumes old Source) ───────────────────────
+            await session.run(
+                "CREATE CONSTRAINT document_id IF NOT EXISTS "
+                "FOR (d:Document) REQUIRE d.id IS UNIQUE"
+            )
+            await session.run(
+                "CREATE CONSTRAINT document_url IF NOT EXISTS "
+                "FOR (d:Document) REQUIRE d.url IS UNIQUE"
+            )
+            await session.run(
+                "CREATE VECTOR INDEX document_embedding_idx IF NOT EXISTS "
+                "FOR (d:Document) ON (d.embedding) "
+                "OPTIONS {indexConfig: {`vector.dimensions`: $dims, "
+                "`vector.similarity_function`: 'cosine'}}",
+                dims=dims,
             )
 
     async def close(self) -> None:
@@ -225,7 +494,7 @@ class AsyncLongTermMemory:
             self._available = False
 
     # ------------------------------------------------------------------
-    # Public async API
+    # Public async API (flat memory store — unchanged)
     # ------------------------------------------------------------------
 
     async def store(
@@ -515,19 +784,19 @@ class KnowledgeGraph:
     """
     Relationship-aware knowledge graph stored natively in Neo4j.
 
-    Three node types:
+    Typed entity nodes (Person, Organization, Technology, Concept, Event,
+    Location, Metric) replace the old generic Entity label.  Each type has
+    its own vector index for semantic search and type-specific properties.
 
-    * **Entity**: Named concepts, people, technologies, organizations.
-      Embedded by ``name + ": " + description`` so semantic search finds
-      entities by meaning, not just exact name match.
+    Typed relationship labels (CAUSES, ENABLES, USES, etc.) replace the old
+    catch-all RELATES_TO.  Free-form verb phrases are classified via keyword
+    matching into typed labels; unmatched phrases fall back to RELATES_TO.
 
-    * **RELATES_TO relationships**: Directed edges ``source → relation → target``
-      with evidence text.  Stored as native Neo4j relationships for efficient
-      multi-hop traversal.
+    Claim nodes store individual assertions linked to entities and documents.
+    Document nodes subsume the old Source node with richer provenance.
 
-    * **Community**: LLM-generated summaries of densely-connected entity
-      clusters, linked via ``MEMBER_OF`` edges.  Updated as a post-synthesis
-      background task.
+    Community nodes are LLM-generated summaries of densely-connected entity
+    clusters, linked via MEMBER_OF edges.
 
     All public methods are async.  The ``_ltm`` back-reference provides access
     to the ``_available`` flag and the Neo4j driver.
@@ -549,6 +818,74 @@ class KnowledgeGraph:
         return self._ltm._available and self._driver is not None
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _embed(self, text: str) -> Optional[List[float]]:
+        """Generate embedding for text, returning None on failure."""
+        from embeddings import embed_texts, EmbeddingError, EMBEDDINGS_ENABLED
+
+        if not EMBEDDINGS_ENABLED:
+            return None
+        try:
+            vecs = await embed_texts([text])
+            return vecs[0] if vecs else None
+        except (EmbeddingError, Exception) as exc:
+            logger.debug("[KnowledgeGraph] Embedding failed: %s", exc)
+            return None
+
+    async def _embed_query(self, text: str) -> Optional[List[float]]:
+        """Generate query embedding, returning None on failure."""
+        from embeddings import embed_query as _eq, EmbeddingError, EMBEDDINGS_ENABLED
+
+        if not EMBEDDINGS_ENABLED:
+            return None
+        try:
+            return await _eq(text)
+        except (EmbeddingError, Exception) as exc:
+            logger.debug("[KnowledgeGraph] Query embed failed: %s", exc)
+            return None
+
+    def _build_union_vector_search(
+        self,
+        index_names: List[str],
+        limit: int,
+        extra_return_fields: str = "",
+    ) -> str:
+        """Build a UNION ALL Cypher query across multiple vector indexes.
+
+        Each sub-query fetches ``limit`` candidates from its index.  The outer
+        query de-duplicates by node id, keeps the highest score per node, and
+        returns the top ``limit`` results sorted by score descending.
+        """
+        subqueries: List[str] = []
+        for idx_name in index_names:
+            sq = (
+                f"CALL db.index.vector.queryNodes('{idx_name}', $limit, $vector) "
+                f"YIELD node, score "
+                f"RETURN node, score{extra_return_fields}"
+            )
+            subqueries.append(f"{{ {sq} }}")
+
+        union = " UNION ALL ".join(subqueries)
+        outer = (
+            f"CALL {{ {union} }} "
+            "WITH node, score "
+            "ORDER BY score DESC "
+            "WITH node, max(score) AS score "
+            "ORDER BY score DESC "
+            "LIMIT $limit"
+        )
+        return outer
+
+    def _any_entity_match(self) -> str:
+        """Cypher fragment matching any typed entity node by name."""
+        parts = [
+            f"MATCH (e:{label} {{name: $name}}) RETURN e" for label in ENTITY_TYPES
+        ]
+        return " UNION ".join(parts)
+
+    # ------------------------------------------------------------------
     # Entity CRUD
     # ------------------------------------------------------------------
 
@@ -558,38 +895,42 @@ class KnowledgeGraph:
         entity_type: str = "concept",
         description: str = "",
         session_id: str = "",
+        properties: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Insert or update an entity.  Deduplicates by semantic name similarity."""
+        """Insert or update a typed entity node.
+
+        Deduplicates by semantic name similarity across ALL entity type indexes.
+        When a near-duplicate exists under a different type, the more specific
+        type wins (specificity ranking: Person > Organization > Technology >
+        Event > Location > Metric > Concept).
+        """
         if not self.available or not name or not name.strip():
             return {"success": False, "message": "Graph not available or empty name"}
 
-        from embeddings import embed_texts, EmbeddingError, EMBEDDINGS_ENABLED
-
+        label = resolve_entity_label(entity_type)
         doc_text = f"{name}: {description}" if description else name
-        vector: Optional[List[float]] = None
-        if EMBEDDINGS_ENABLED:
-            try:
-                vecs = await embed_texts([doc_text])
-                vector = vecs[0] if vecs else None
-            except (EmbeddingError, Exception) as exc:
-                logger.debug("[KnowledgeGraph] Embedding failed for entity: %s", exc)
+        vector = await self._embed(doc_text)
 
         assert self._driver is not None
         now = datetime.now().isoformat()
         name_stripped = name.strip()
         desc_stripped = description.strip()
+        extra_props = properties or {}
 
         async with self._driver.session(database=self._database) as session:
-            # Dedup: check if a semantically similar entity already exists
+            # Dedup: check ALL entity type vector indexes for near-duplicate
             if vector is not None:
                 try:
+                    # UNION ALL across all entity type indexes
+                    union_q = self._build_union_vector_search(
+                        list(_ENTITY_INDEX_NAMES.values()), 1
+                    )
                     result = await session.run(
-                        "CALL db.index.vector.queryNodes("
-                        "  'entity_embedding_idx', 1, $vector"
-                        ") YIELD node, score "
+                        f"{union_q} "
                         "WHERE score >= $threshold "
-                        "RETURN node, score",
+                        "RETURN node, score LIMIT 1",
                         vector=vector,
+                        limit=1,
                         threshold=_ENTITY_DEDUP_THRESHOLD,
                     )
                     record = await result.single()
@@ -622,15 +963,41 @@ class KnowledgeGraph:
                         }
                         if vector is not None:
                             update_props["embedding"] = vector
+                        # Merge type-specific properties
+                        for k, v in extra_props.items():
+                            update_props[k] = v
 
-                        await session.run(
-                            "MATCH (e:Entity {id: $eid}) " "SET e += $props",
-                            eid=existing_id,
-                            props=update_props,
-                        )
+                        # Determine if type upgrade is needed
+                        existing_type = existing.get("entity_type", "concept")
+                        existing_label = resolve_entity_label(existing_type)
+                        new_specificity = _TYPE_SPECIFICITY.get(label, 1)
+                        existing_specificity = _TYPE_SPECIFICITY.get(existing_label, 1)
+
+                        if (
+                            new_specificity > existing_specificity
+                            and label != existing_label
+                        ):
+                            # Type upgrade: remove old label, add new one
+                            update_props["entity_type"] = entity_type.lower().strip()
+                            await session.run(
+                                f"MATCH (e:{existing_label} {{id: $eid}}) "
+                                f"REMOVE e:{existing_label} "
+                                f"SET e:{label} "
+                                "SET e += $props",
+                                eid=existing_id,
+                                props=update_props,
+                            )
+                        else:
+                            # Same type or less specific — just update props
+                            await session.run(
+                                f"MATCH (e {{id: $eid}}) " "SET e += $props",
+                                eid=existing_id,
+                                props=update_props,
+                            )
                         return {
                             "success": True,
                             "entity_id": existing_id,
+                            "entity_type": label,
                             "merged": True,
                             "mention_count": mention_count,
                         }
@@ -642,7 +1009,7 @@ class KnowledgeGraph:
             props: Dict[str, Any] = {
                 "id": entity_id,
                 "name": name_stripped,
-                "entity_type": entity_type,
+                "entity_type": entity_type.lower().strip(),
                 "description": (
                     f"{name_stripped}: {desc_stripped}"
                     if desc_stripped
@@ -655,15 +1022,23 @@ class KnowledgeGraph:
                 "confirmation_count": 1,
                 "source_sessions": json.dumps([session_id] if session_id else []),
             }
+            # Type-specific properties
+            for k, v in extra_props.items():
+                props[k] = v
             if vector is not None:
                 props["embedding"] = vector
 
             try:
                 await session.run(
-                    "CREATE (e:Entity) SET e = $props",
+                    f"CREATE (e:{label}) SET e = $props",
                     props=props,
                 )
-                return {"success": True, "entity_id": entity_id, "merged": False}
+                return {
+                    "success": True,
+                    "entity_id": entity_id,
+                    "entity_type": label,
+                    "merged": False,
+                }
             except Exception as exc:
                 logger.error("[KnowledgeGraph] Entity store failed: %s", exc)
                 return {"success": False, "message": str(exc)}
@@ -681,13 +1056,18 @@ class KnowledgeGraph:
         confidence: float = 0.8,
         session_id: str = "",
         step_id: int = 0,
+        relationship_label: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Store a directed relationship between two entities.
+        """Store a directed typed relationship between two entities.
 
-        Deduplicates by (source, target, relation_type): if an identical triple
-        already exists, the existing edge is updated rather than duplicated —
-        confidence is raised to the higher of the two values, evidence is
-        appended (if new), and confirmation_count is incremented.
+        If *relationship_label* is not provided, the free-form *relation*
+        string is classified via keyword matching into a typed Neo4j label
+        (CAUSES, ENABLES, USES, etc.) with RELATES_TO as fallback.
+
+        Deduplicates by (source_name, target_name, relation_type, rel_label):
+        if an identical edge already exists, it is updated rather than
+        duplicated — confidence is raised to the higher of the two values,
+        evidence is appended (if new), and confirmation_count is incremented.
         """
         if not self.available:
             return {"success": False, "message": "Graph not available"}
@@ -703,18 +1083,26 @@ class KnowledgeGraph:
         tgt = target.strip()
         rel = relation.strip()
         evid = evidence.strip()
+        rel_label = relationship_label or classify_relation(rel)
+
+        # Build Cypher that matches any typed entity node for source/target.
+        # We can't know the label of source/target at this point, so we use
+        # a label-agnostic match via property.
+        all_labels = "|".join(ENTITY_TYPES)
 
         async with self._driver.session(database=self._database) as session:
             try:
-                # ── Dedup check: exact match on source→target + relation_type ─
-                result = await session.run(
-                    "MATCH (s:Entity {name: $source})-[r:RELATES_TO]->(t:Entity {name: $target}) "
+                # ── Dedup check: exact match on source→target + relation_type + label ─
+                dedup_q = (
+                    f"MATCH (s:{all_labels} {{name: $source}})"
+                    f"-[r:{rel_label}]->"
+                    f"(t:{all_labels} {{name: $target}}) "
                     "WHERE r.relation_type = $relation "
                     "RETURN r.id AS rid, r.confidence AS conf, "
-                    "       r.evidence AS evid, r.confirmation_count AS cnt",
-                    source=src,
-                    target=tgt,
-                    relation=rel,
+                    "       r.evidence AS evid, r.confirmation_count AS cnt"
+                )
+                result = await session.run(
+                    dedup_q, source=src, target=tgt, relation=rel
                 )
                 existing = await result.single()
                 if existing:
@@ -728,7 +1116,7 @@ class KnowledgeGraph:
                     new_conf = max(existing["conf"] or 0.8, confidence)
                     new_count = (existing["cnt"] or 1) + 1
                     await session.run(
-                        "MATCH ()-[r:RELATES_TO {id: $rid}]->() "
+                        f"MATCH ()-[r:{rel_label} {{id: $rid}}]->() "
                         "SET r.confidence = $conf, "
                         "    r.confirmation_count = $cnt, "
                         "    r.evidence = $evid, "
@@ -742,16 +1130,18 @@ class KnowledgeGraph:
                     return {
                         "success": True,
                         "relationship_id": existing["rid"],
+                        "relationship_label": rel_label,
                         "merged": True,
                     }
 
                 # ── Create new edge ──────────────────────────────────────────
                 rel_id = str(uuid.uuid4())
                 await session.run(
-                    "MATCH (s:Entity {name: $source}) "
-                    "MATCH (t:Entity {name: $target}) "
-                    "CREATE (s)-[:RELATES_TO {"
+                    f"MATCH (s:{all_labels} {{name: $source}}) "
+                    f"MATCH (t:{all_labels} {{name: $target}}) "
+                    f"CREATE (s)-[:{rel_label} {{"
                     "  id: $rel_id, relation_type: $relation, "
+                    "  relationship_label: $rel_label, "
                     "  confidence: $confidence, evidence: $evidence, "
                     "  session_id: $session_id, step_id: $step_id, "
                     "  created_at: $now, last_confirmed: $now, "
@@ -761,13 +1151,19 @@ class KnowledgeGraph:
                     target=tgt,
                     rel_id=rel_id,
                     relation=rel,
+                    rel_label=rel_label,
                     confidence=confidence,
                     evidence=evid,
                     session_id=session_id,
                     step_id=step_id,
                     now=now,
                 )
-                return {"success": True, "relationship_id": rel_id, "merged": False}
+                return {
+                    "success": True,
+                    "relationship_id": rel_id,
+                    "relationship_label": rel_label,
+                    "merged": False,
+                }
             except Exception as exc:
                 logger.error("[KnowledgeGraph] Relationship store failed: %s", exc)
                 return {"success": False, "message": str(exc)}
@@ -781,54 +1177,52 @@ class KnowledgeGraph:
         query: str,
         limit: int = 5,
         include_hierarchy: bool = False,
+        node_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Find entities semantically similar to *query*.
 
+        Searches across all entity type vector indexes (or a subset if
+        *node_types* is specified) using UNION ALL, then merges and ranks
+        by similarity score.
+
         If *include_hierarchy* is True, each result also carries an
         ``ancestors`` list of parent entity names (via IS_A edges, up to
-        3 hops) so the caller can surface broader category context.
+        3 hops).
         """
         if not self.available:
             return []
 
-        from embeddings import (
-            embed_query as _embed_q,
-            EmbeddingError,
-            EMBEDDINGS_ENABLED,
-        )
-
-        query_vec: Optional[List[float]] = None
-        if EMBEDDINGS_ENABLED:
-            try:
-                query_vec = await _embed_q(query)
-            except (EmbeddingError, Exception) as exc:
-                logger.debug("[KnowledgeGraph] Entity search embed failed: %s", exc)
-
+        query_vec = await self._embed_query(query)
         if query_vec is None:
+            return []
+
+        # Determine which indexes to query
+        if node_types:
+            resolved = [resolve_entity_label(t) for t in node_types]
+            index_names = [
+                _ENTITY_INDEX_NAMES[lbl]
+                for lbl in resolved
+                if lbl in _ENTITY_INDEX_NAMES
+            ]
+        else:
+            index_names = list(_ENTITY_INDEX_NAMES.values())
+
+        if not index_names:
             return []
 
         assert self._driver is not None
         async with self._driver.session(database=self._database) as session:
             try:
+                union_q = self._build_union_vector_search(index_names, limit)
                 if include_hierarchy:
-                    result = await session.run(
-                        "CALL db.index.vector.queryNodes("
-                        "  'entity_embedding_idx', $limit, $vector"
-                        ") YIELD node, score "
-                        "OPTIONAL MATCH (node)-[:IS_A*1..3]->(anc:Entity) "
-                        "RETURN node, score, collect(DISTINCT anc.name) AS ancestors",
-                        vector=query_vec,
-                        limit=limit,
+                    cypher = (
+                        f"{union_q} "
+                        "OPTIONAL MATCH (node)-[:IS_A*1..3]->(anc) "
+                        "RETURN node, score, collect(DISTINCT anc.name) AS ancestors"
                     )
                 else:
-                    result = await session.run(
-                        "CALL db.index.vector.queryNodes("
-                        "  'entity_embedding_idx', $limit, $vector"
-                        ") YIELD node, score "
-                        "RETURN node, score, [] AS ancestors",
-                        vector=query_vec,
-                        limit=limit,
-                    )
+                    cypher = f"{union_q} " "RETURN node, score, [] AS ancestors"
+                result = await session.run(cypher, vector=query_vec, limit=limit)
                 records = await result.data()
             except Exception as exc:
                 logger.debug("[KnowledgeGraph] Entity query failed: %s", exc)
@@ -837,19 +1231,48 @@ class KnowledgeGraph:
         entities: List[Dict[str, Any]] = []
         for rec in records:
             node = rec["node"]
-            entities.append(
-                {
-                    "id": node.get("id", ""),
-                    "name": node.get("name", ""),
-                    "entity_type": node.get("entity_type", ""),
-                    "description": node.get("description", ""),
-                    "mention_count": node.get("mention_count", 1),
-                    "last_confirmed": node.get("last_confirmed", ""),
-                    "confirmation_count": node.get("confirmation_count", 1),
-                    "similarity": round(rec["score"], 4),
-                    "ancestors": rec.get("ancestors") or [],
-                }
-            )
+            entity_type_str = node.get("entity_type", "concept")
+            entity_dict: Dict[str, Any] = {
+                "id": node.get("id", ""),
+                "name": node.get("name", ""),
+                "entity_type": entity_type_str,
+                "entity_label": resolve_entity_label(entity_type_str),
+                "description": node.get("description", ""),
+                "mention_count": node.get("mention_count", 1),
+                "last_confirmed": node.get("last_confirmed", ""),
+                "confirmation_count": node.get("confirmation_count", 1),
+                "similarity": round(rec["score"], 4),
+                "ancestors": rec.get("ancestors") or [],
+            }
+            # Include type-specific properties if present
+            for key in (
+                "affiliation",
+                "role",
+                "expertise_areas",
+                "org_type",
+                "industry",
+                "headquarters",
+                "tech_category",
+                "version",
+                "license",
+                "maturity",
+                "domain",
+                "abstraction_level",
+                "start_date",
+                "end_date",
+                "event_type",
+                "location",
+                "geo_type",
+                "parent_location",
+                "value",
+                "unit",
+                "measurement_date",
+                "trend",
+            ):
+                val = node.get(key)
+                if val is not None:
+                    entity_dict[key] = val
+            entities.append(entity_dict)
         return entities
 
     # ------------------------------------------------------------------
@@ -865,23 +1288,23 @@ class KnowledgeGraph:
         """
         Get relationships involving the given entities.
 
-        Supports multi-hop traversal: hop 1 returns direct relationships,
-        hop 2 adds relationships of the connected entities, etc.
-
-        Either *entity_ids* or *entity_names* (or both) can be provided.
-        Names are matched against the ``name`` property of Entity nodes.
+        Traverses all typed factual relationship labels (CAUSES, ENABLES,
+        USES, ..., RELATES_TO) for multi-hop exploration.
         """
         if not self.available:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         # Resolve entity_ids → names
-        names: set[str] = set(entity_names or [])
+        names: Set[str] = set(entity_names or [])
         if entity_ids:
             async with self._driver.session(database=self._database) as session:
                 try:
+                    # Search across all typed entity labels
                     result = await session.run(
-                        "MATCH (e:Entity) WHERE e.id IN $ids RETURN e.name AS name",
+                        f"MATCH (e:{all_labels}) WHERE e.id IN $ids RETURN e.name AS name",
                         ids=entity_ids,
                     )
                     records = await result.data()
@@ -894,22 +1317,21 @@ class KnowledgeGraph:
         if not names:
             return []
 
-        # Use variable-length Cypher path for multi-hop traversal.
-        # Extract individual relationship properties directly in Cypher rather
-        # than returning the relationship object itself — neo4j driver 5.x
-        # serializes Relationship objects as (start_id, end_id, type, props)
-        # tuples via .data(), not as plain dicts.
+        # Use variable-length Cypher path for multi-hop traversal across
+        # ALL factual relationship types.
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (seed:Entity) WHERE seed.name IN $names "
-                    "MATCH path = (seed)-[r:RELATES_TO*1.."
+                    f"MATCH (seed:{all_labels}) WHERE seed.name IN $names "
+                    f"MATCH path = (seed)-[r:{_FACTUAL_REL_CYPHER}*1.."
                     + str(max_hops)
-                    + "]-(other:Entity) "
+                    + f"]-(other:{all_labels}) "
                     "UNWIND relationships(path) AS rel "
                     "WITH DISTINCT rel, startNode(rel) AS src, endNode(rel) AS tgt "
                     "RETURN rel.id AS rel_id, "
                     "       rel.relation_type AS relation_type, "
+                    "       rel.relationship_label AS relationship_label, "
+                    "       type(rel) AS rel_neo4j_type, "
                     "       rel.confidence AS confidence, "
                     "       rel.evidence AS evidence, "
                     "       rel.session_id AS session_id, "
@@ -922,7 +1344,7 @@ class KnowledgeGraph:
                 logger.debug("[KnowledgeGraph] Relationship traversal failed: %s", exc)
                 return []
 
-        seen_ids: set[str] = set()
+        seen_ids: Set[str] = set()
         all_rels: List[Dict[str, Any]] = []
         for rec in records:
             rel_id = rec.get("rel_id") or ""
@@ -935,6 +1357,8 @@ class KnowledgeGraph:
                     "source_entity": rec.get("source_entity", ""),
                     "target_entity": rec.get("target_entity", ""),
                     "relation_type": rec.get("relation_type", ""),
+                    "relationship_label": rec.get("relationship_label")
+                    or rec.get("rel_neo4j_type", "RELATES_TO"),
                     "confidence": rec.get("confidence", 0.0),
                     "evidence": rec.get("evidence", ""),
                     "session_id": rec.get("session_id", ""),
@@ -954,11 +1378,13 @@ class KnowledgeGraph:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 if entity_ids:
                     result = await session.run(
-                        "MATCH (e:Entity)-[:MEMBER_OF]->(c:Community) "
+                        f"MATCH (e:{all_labels})-[:MEMBER_OF]->(c:Community) "
                         "WHERE e.id IN $ids "
                         "RETURN DISTINCT c",
                         ids=entity_ids,
@@ -993,21 +1419,6 @@ class KnowledgeGraph:
         """
         Detect entity communities by relationship co-occurrence and generate
         LLM summaries for each cluster.
-
-        Parameters
-        ----------
-        summarize_fn:
-            Async callable that takes a text prompt and returns an LLM-generated
-            summary string.  Provided by the orchestrator to avoid coupling the
-            graph layer to a specific LLM backend.
-        max_communities:
-            Maximum number of communities to process per call.  Prevents
-            unbounded sequential LLM calls when the graph is large.
-
-        Returns
-        -------
-        int
-            Number of communities created or updated.
         """
         if not self.available:
             return 0
@@ -1040,19 +1451,7 @@ class KnowledgeGraph:
 
             topic = ", ".join(sorted(cluster_names)[:3])
 
-            community_vector: Optional[List[float]] = None
-            try:
-                from embeddings import (
-                    embed_texts,
-                    EmbeddingError,
-                    EMBEDDINGS_ENABLED as _EE,
-                )
-
-                if _EE:
-                    vecs = await embed_texts([summary.strip()])
-                    community_vector = vecs[0] if vecs else None
-            except Exception:
-                pass
+            community_vector = await self._embed(summary.strip())
 
             await self._store_community(
                 cluster_entity_ids, topic, summary.strip(), community_vector
@@ -1069,12 +1468,13 @@ class KnowledgeGraph:
         Returns list of (entity_id_list, entity_name_set) tuples.
         """
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
 
-        # Fetch adjacency from Neo4j in a single query
+        # Fetch adjacency from Neo4j — match all factual relationship types
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (s:Entity)-[:RELATES_TO]-(t:Entity) "
+                    f"MATCH (s:{all_labels})-[:{_FACTUAL_REL_CYPHER}]-(t:{all_labels}) "
                     "RETURN s.name AS source, t.name AS target"
                 )
                 records = await result.data()
@@ -1085,7 +1485,7 @@ class KnowledgeGraph:
             return []
 
         # Build adjacency by entity name
-        adjacency: Dict[str, set[str]] = defaultdict(set)
+        adjacency: Dict[str, Set[str]] = defaultdict(set)
         for rec in records:
             src = rec["source"]
             tgt = rec["target"]
@@ -1094,13 +1494,13 @@ class KnowledgeGraph:
                 adjacency[tgt].add(src)
 
         # Simple greedy clustering
-        visited: set[str] = set()
-        clusters: List[set[str]] = []
+        visited: Set[str] = set()
+        clusters: List[Set[str]] = []
 
         for entity_name in adjacency:
             if entity_name in visited:
                 continue
-            cluster: set[str] = {entity_name}
+            cluster: Set[str] = {entity_name}
             queue = [entity_name]
             while queue:
                 current = queue.pop(0)
@@ -1115,11 +1515,11 @@ class KnowledgeGraph:
                 visited |= cluster
                 clusters.append(cluster)
 
-        # Resolve names → entity_ids
+        # Resolve names → entity_ids across all typed labels
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (e:Entity) RETURN e.name AS name, e.id AS id"
+                    f"MATCH (e:{all_labels}) RETURN e.name AS name, e.id AS id"
                 )
                 records = await result.data()
             except Exception:
@@ -1139,39 +1539,44 @@ class KnowledgeGraph:
         return final
 
     async def _build_cluster_context(
-        self, entity_ids: List[str], entity_names: set[str]
+        self, entity_ids: List[str], entity_names: Set[str]
     ) -> str:
         """Build a text context for community summarization."""
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
         parts: List[str] = []
 
         async with self._driver.session(database=self._database) as session:
             # Entity descriptions
             try:
                 result = await session.run(
-                    "MATCH (e:Entity) WHERE e.id IN $ids "
-                    "RETURN e.description AS desc",
+                    f"MATCH (e:{all_labels}) WHERE e.id IN $ids "
+                    "RETURN e.description AS desc, e.entity_type AS etype",
                     ids=entity_ids,
                 )
                 records = await result.data()
                 for rec in records:
                     if rec["desc"]:
-                        parts.append(f"Entity: {rec['desc']}")
+                        etype = rec.get("etype", "")
+                        parts.append(f"Entity [{etype}]: {rec['desc']}")
             except Exception:
                 pass
 
             # Relationships between cluster members
             try:
                 result = await session.run(
-                    "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
+                    f"MATCH (s:{all_labels})-[r:{_FACTUAL_REL_CYPHER}]->(t:{all_labels}) "
                     "WHERE s.name IN $names AND t.name IN $names "
-                    "RETURN s.name AS src, r.relation_type AS rel, t.name AS tgt",
+                    "RETURN s.name AS src, type(r) AS rtype, "
+                    "       r.relation_type AS rel, t.name AS tgt",
                     names=list(entity_names),
                 )
                 records = await result.data()
                 for rec in records:
+                    rtype = rec.get("rtype", "RELATES_TO")
+                    rel_desc = rec.get("rel", rtype)
                     parts.append(
-                        f"Relationship: {rec['src']} → {rec['rel']} → {rec['tgt']}"
+                        f"Relationship: {rec['src']} ─{rtype}→ {rec['tgt']} ({rel_desc})"
                     )
             except Exception:
                 pass
@@ -1188,6 +1593,7 @@ class KnowledgeGraph:
         """Store or update a community summary."""
         assert self._driver is not None
         now = datetime.now().isoformat()
+        all_labels = "|".join(ENTITY_TYPES)
 
         async with self._driver.session(database=self._database) as session:
             # Check if a community with overlapping entities already exists
@@ -1222,7 +1628,7 @@ class KnowledgeGraph:
                         await session.run(
                             "MATCH (c:Community {id: $cid}) "
                             "UNWIND $eids AS eid "
-                            "MATCH (e:Entity {id: eid}) "
+                            f"MATCH (e:{all_labels} {{id: eid}}) "
                             "MERGE (e)-[:MEMBER_OF]->(c)",
                             cid=c["id"],
                             eids=entity_ids,
@@ -1251,13 +1657,543 @@ class KnowledgeGraph:
                 await session.run(
                     "MATCH (c:Community {id: $cid}) "
                     "UNWIND $eids AS eid "
-                    "MATCH (e:Entity {id: eid}) "
+                    f"MATCH (e:{all_labels} {{id: eid}}) "
                     "MERGE (e)-[:MEMBER_OF]->(c)",
                     cid=community_id,
                     eids=entity_ids,
                 )
             except Exception as exc:
                 logger.debug("[KnowledgeGraph] Community store failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Claim CRUD
+    # ------------------------------------------------------------------
+
+    async def store_claim(
+        self,
+        text: str,
+        confidence: float = 0.5,
+        status: str = "unverified",
+        source_session: str = "",
+        step_id: int = 0,
+        entity_names: Optional[List[str]] = None,
+        document_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Store a Claim node and link it to entities via ASSERTS edges.
+
+        Optionally link to a Document via a SUPPORTS edge.
+        """
+        if not self.available or not text or not text.strip():
+            return {"success": False, "message": "Graph not available or empty text"}
+
+        if status not in CLAIM_STATUSES:
+            status = "unverified"
+
+        vector = await self._embed(text.strip())
+
+        assert self._driver is not None
+        now = datetime.now().isoformat()
+        claim_id = str(uuid.uuid4())
+        all_labels = "|".join(ENTITY_TYPES)
+
+        async with self._driver.session(database=self._database) as session:
+            # Dedup by vector similarity
+            if vector is not None:
+                try:
+                    result = await session.run(
+                        "CALL db.index.vector.queryNodes("
+                        "  'claim_embedding_idx', 1, $vector"
+                        ") YIELD node, score "
+                        "WHERE score >= $threshold "
+                        "RETURN node.id AS id, score",
+                        vector=vector,
+                        threshold=_DEDUP_THRESHOLD,
+                    )
+                    record = await result.single()
+                    if record:
+                        return {
+                            "success": False,
+                            "claim_id": record["id"],
+                            "message": (
+                                f"Near-duplicate claim exists "
+                                f"(similarity={record['score']:.3f})"
+                            ),
+                        }
+                except Exception:
+                    pass
+
+            try:
+                props: Dict[str, Any] = {
+                    "id": claim_id,
+                    "text": text.strip(),
+                    "confidence": confidence,
+                    "status": status,
+                    "source_session": source_session,
+                    "step_id": step_id,
+                    "created_at": now,
+                }
+                if vector is not None:
+                    props["embedding"] = vector
+
+                await session.run(
+                    "CREATE (cl:Claim) SET cl = $props",
+                    props=props,
+                )
+
+                # Link to entities via ASSERTS
+                if entity_names:
+                    for ename in entity_names:
+                        ename = ename.strip()
+                        if not ename:
+                            continue
+                        await session.run(
+                            f"MATCH (e:{all_labels} {{name: $name}}) "
+                            "MATCH (cl:Claim {id: $cid}) "
+                            "MERGE (cl)-[:ASSERTS]->(e)",
+                            name=ename,
+                            cid=claim_id,
+                        )
+
+                # Link to document via SUPPORTS
+                if document_id:
+                    await session.run(
+                        "MATCH (d:Document {id: $did}) "
+                        "MATCH (cl:Claim {id: $cid}) "
+                        "MERGE (d)-[:SUPPORTS]->(cl)",
+                        did=document_id,
+                        cid=claim_id,
+                    )
+
+                return {"success": True, "claim_id": claim_id}
+            except Exception as exc:
+                logger.error("[KnowledgeGraph] Claim store failed: %s", exc)
+                return {"success": False, "message": str(exc)}
+
+    async def find_claims(
+        self,
+        query: str = "",
+        limit: int = 10,
+        entity_name: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Find claims by semantic search, optionally filtered by entity or status."""
+        if not self.available:
+            return []
+
+        assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
+        # If entity_name is provided, use graph traversal instead of vector search
+        if entity_name:
+            async with self._driver.session(database=self._database) as session:
+                try:
+                    status_clause = ""
+                    params: Dict[str, Any] = {
+                        "name": entity_name.strip(),
+                        "limit": limit,
+                    }
+                    if status:
+                        status_clause = " AND cl.status = $status"
+                        params["status"] = status
+                    result = await session.run(
+                        f"MATCH (cl:Claim)-[:ASSERTS]->(e:{all_labels} {{name: $name}}) "
+                        f"WHERE true{status_clause} "
+                        "RETURN cl ORDER BY cl.confidence DESC LIMIT $limit",
+                        **params,
+                    )
+                    records = await result.data()
+                except Exception as exc:
+                    logger.debug(
+                        "[KnowledgeGraph] Claim search (entity) failed: %s", exc
+                    )
+                    return []
+
+            return [self._unpack_claim(rec["cl"]) for rec in records]
+
+        # Vector search
+        if not query:
+            # Return recent claims
+            async with self._driver.session(database=self._database) as session:
+                try:
+                    status_clause = ""
+                    params = {"limit": limit}
+                    if status:
+                        status_clause = " WHERE cl.status = $status"
+                        params["status"] = status
+                    result = await session.run(
+                        f"MATCH (cl:Claim){status_clause} "
+                        "RETURN cl ORDER BY cl.created_at DESC LIMIT $limit",
+                        **params,
+                    )
+                    records = await result.data()
+                except Exception:
+                    return []
+            return [self._unpack_claim(rec["cl"]) for rec in records]
+
+        query_vec = await self._embed_query(query)
+        if query_vec is None:
+            return []
+
+        async with self._driver.session(database=self._database) as session:
+            try:
+                status_clause = ""
+                params = {"vector": query_vec, "limit": limit}
+                if status:
+                    status_clause = " AND node.status = $status"
+                    params["status"] = status
+                result = await session.run(
+                    "CALL db.index.vector.queryNodes("
+                    "  'claim_embedding_idx', $limit, $vector"
+                    ") YIELD node, score "
+                    f"WHERE true{status_clause} "
+                    "RETURN node, score ORDER BY score DESC LIMIT $limit",
+                    **params,
+                )
+                records = await result.data()
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Claim vector search failed: %s", exc)
+                return []
+
+        return [
+            {**self._unpack_claim(rec["node"]), "similarity": round(rec["score"], 4)}
+            for rec in records
+        ]
+
+    async def update_claim_status(
+        self,
+        claim_id: str,
+        new_status: str,
+    ) -> Dict[str, Any]:
+        """Update a claim's status."""
+        if not self.available:
+            return {"success": False, "message": "Graph not available"}
+        if new_status not in CLAIM_STATUSES:
+            return {"success": False, "message": f"Invalid status: {new_status}"}
+
+        assert self._driver is not None
+        async with self._driver.session(database=self._database) as session:
+            try:
+                result = await session.run(
+                    "MATCH (cl:Claim {id: $cid}) "
+                    "SET cl.status = $status "
+                    "RETURN 'ok' AS result",
+                    cid=claim_id,
+                    status=new_status,
+                )
+                record = await result.single()
+                if record:
+                    return {"success": True}
+                return {"success": False, "message": "Claim not found"}
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Claim status update failed: %s", exc)
+                return {"success": False, "message": str(exc)}
+
+    @staticmethod
+    def _unpack_claim(node: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": node.get("id", ""),
+            "text": node.get("text", ""),
+            "confidence": node.get("confidence", 0.0),
+            "status": node.get("status", "unverified"),
+            "source_session": node.get("source_session", ""),
+            "step_id": node.get("step_id", 0),
+            "created_at": node.get("created_at", ""),
+        }
+
+    # ------------------------------------------------------------------
+    # Document CRUD (subsumes old Source node)
+    # ------------------------------------------------------------------
+
+    async def store_document(
+        self,
+        url: str,
+        title: str = "",
+        content_summary: str = "",
+        doc_type: str = "article",
+        credibility_score: float = 0.5,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        """Store or update a Document node (unique by URL).
+
+        On conflict, title is updated only if the new value is non-empty;
+        credibility_score is updated to the higher of the two values.
+        """
+        if not self.available:
+            return {"success": False, "message": "Graph not available"}
+        if not url or not url.strip().startswith("http"):
+            return {"success": False, "message": "Invalid URL"}
+
+        from urllib.parse import urlparse
+
+        domain = urlparse(url.strip()).netloc or ""
+        now = datetime.now().isoformat()
+        doc_id = str(uuid.uuid4())
+
+        # Embed the content summary for semantic search
+        embed_text = (
+            content_summary.strip() if content_summary.strip() else title.strip()
+        )
+        vector = await self._embed(embed_text) if embed_text else None
+
+        assert self._driver is not None
+        async with self._driver.session(database=self._database) as session:
+            try:
+                # Build ON CREATE / ON MATCH dynamically to handle embedding
+                create_props = (
+                    "s.id = $doc_id, s.title = $title, "
+                    "s.content_summary = $summary, "
+                    "s.doc_type = $doc_type, "
+                    "s.credibility_score = $credibility_score, "
+                    "s.domain = $domain, "
+                    "s.session_id = $session_id, "
+                    "s.first_seen = $now, s.retrieved_at = $now"
+                )
+                match_set = (
+                    "s.title = CASE WHEN $title <> '' THEN $title ELSE s.title END, "
+                    "s.credibility_score = CASE "
+                    "  WHEN $credibility_score > s.credibility_score "
+                    "  THEN $credibility_score ELSE s.credibility_score END, "
+                    "s.content_summary = CASE "
+                    "  WHEN $summary <> '' THEN $summary ELSE s.content_summary END"
+                )
+                if vector is not None:
+                    create_props += ", s.embedding = $vector"
+                    match_set += ", s.embedding = $vector"
+
+                params: Dict[str, Any] = {
+                    "url": url.strip(),
+                    "doc_id": doc_id,
+                    "title": title.strip(),
+                    "summary": content_summary.strip(),
+                    "doc_type": doc_type,
+                    "credibility_score": credibility_score,
+                    "domain": domain,
+                    "session_id": session_id,
+                    "now": now,
+                }
+                if vector is not None:
+                    params["vector"] = vector
+
+                await session.run(
+                    f"MERGE (s:Document {{url: $url}}) "
+                    f"ON CREATE SET {create_props} "
+                    f"ON MATCH SET {match_set}",
+                    **params,
+                )
+                return {"success": True, "url": url.strip(), "document_id": doc_id}
+            except Exception as exc:
+                logger.error("[KnowledgeGraph] Document store failed: %s", exc)
+                return {"success": False, "message": str(exc)}
+
+    async def find_documents(
+        self,
+        query: str = "",
+        limit: int = 10,
+        doc_type: Optional[str] = None,
+        min_credibility: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Find documents by semantic search, optionally filtered."""
+        if not self.available:
+            return []
+
+        assert self._driver is not None
+
+        if not query:
+            # Return recent documents
+            where_parts: List[str] = []
+            params: Dict[str, Any] = {"limit": limit}
+            if doc_type:
+                where_parts.append("d.doc_type = $doc_type")
+                params["doc_type"] = doc_type
+            if min_credibility is not None:
+                where_parts.append("d.credibility_score >= $min_cred")
+                params["min_cred"] = min_credibility
+            where_clause = " WHERE " + " AND ".join(where_parts) if where_parts else ""
+
+            async with self._driver.session(database=self._database) as session:
+                try:
+                    result = await session.run(
+                        f"MATCH (d:Document){where_clause} "
+                        "RETURN d ORDER BY d.retrieved_at DESC LIMIT $limit",
+                        **params,
+                    )
+                    records = await result.data()
+                except Exception:
+                    return []
+            return [self._unpack_document(rec["d"]) for rec in records]
+
+        query_vec = await self._embed_query(query)
+        if query_vec is None:
+            return []
+
+        filter_parts: List[str] = []
+        params = {"vector": query_vec, "limit": limit}
+        if doc_type:
+            filter_parts.append("node.doc_type = $doc_type")
+            params["doc_type"] = doc_type
+        if min_credibility is not None:
+            filter_parts.append("node.credibility_score >= $min_cred")
+            params["min_cred"] = min_credibility
+        filter_clause = (" AND " + " AND ".join(filter_parts)) if filter_parts else ""
+
+        async with self._driver.session(database=self._database) as session:
+            try:
+                result = await session.run(
+                    "CALL db.index.vector.queryNodes("
+                    "  'document_embedding_idx', $limit, $vector"
+                    ") YIELD node, score "
+                    f"WHERE true{filter_clause} "
+                    "RETURN node, score ORDER BY score DESC LIMIT $limit",
+                    **params,
+                )
+                records = await result.data()
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Document vector search failed: %s", exc)
+                return []
+
+        return [
+            {**self._unpack_document(rec["node"]), "similarity": round(rec["score"], 4)}
+            for rec in records
+        ]
+
+    async def link_document_to_entity(
+        self,
+        document_url: str,
+        entity_name: str,
+        relationship_label: str = "MENTIONS",
+    ) -> Dict[str, Any]:
+        """Create a typed edge from a Document to an entity node."""
+        if not self.available:
+            return {"success": False, "message": "Graph not available"}
+
+        # Validate relationship label
+        valid_labels = {
+            "MENTIONS",
+            "SUPPORTS",
+            "REFUTES",
+            "AUTHORED_BY",
+            "SOURCED_FROM",
+        }
+        if relationship_label not in valid_labels:
+            relationship_label = "MENTIONS"
+
+        assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
+        async with self._driver.session(database=self._database) as session:
+            try:
+                result = await session.run(
+                    f"MATCH (e:{all_labels} {{name: $name}}) "
+                    "MATCH (d:Document {url: $url}) "
+                    f"MERGE (e)-[:{relationship_label}]->(d) "
+                    "RETURN 'ok' AS result",
+                    name=entity_name.strip(),
+                    url=document_url.strip(),
+                )
+                record = await result.single()
+                if record:
+                    return {"success": True}
+                return {"success": False, "message": "Entity or document not found"}
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Document-entity link failed: %s", exc)
+                return {"success": False, "message": str(exc)}
+
+    @staticmethod
+    def _unpack_document(node: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": node.get("id", ""),
+            "url": node.get("url", ""),
+            "title": node.get("title", ""),
+            "content_summary": node.get("content_summary", ""),
+            "doc_type": node.get("doc_type", ""),
+            "credibility_score": node.get("credibility_score", 0.0),
+            "domain": node.get("domain", ""),
+            "session_id": node.get("session_id", ""),
+            "first_seen": node.get("first_seen", ""),
+            "retrieved_at": node.get("retrieved_at", ""),
+        }
+
+    # ------------------------------------------------------------------
+    # Deprecated Source methods (thin wrappers for backward compat)
+    # ------------------------------------------------------------------
+
+    async def store_source(
+        self,
+        url: str,
+        title: str = "",
+        credibility_score: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Deprecated — use store_document() instead."""
+        logger.debug(
+            "[KnowledgeGraph] store_source() is deprecated — use store_document()"
+        )
+        return await self.store_document(
+            url=url, title=title, credibility_score=credibility_score
+        )
+
+    async def link_to_source(
+        self,
+        entity_name: str,
+        source_url: str,
+    ) -> Dict[str, Any]:
+        """Deprecated — use link_document_to_entity() instead."""
+        logger.debug(
+            "[KnowledgeGraph] link_to_source() is deprecated — "
+            "use link_document_to_entity()"
+        )
+        return await self.link_document_to_entity(
+            document_url=source_url,
+            entity_name=entity_name,
+            relationship_label="SOURCED_FROM",
+        )
+
+    async def get_provenance(
+        self,
+        entity_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return Document nodes linked to the given entities via SOURCED_FROM."""
+        if not self.available:
+            return []
+
+        assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
+        async with self._driver.session(database=self._database) as session:
+            try:
+                if entity_names:
+                    result = await session.run(
+                        f"MATCH (e:{all_labels})-[:SOURCED_FROM]->(s:Document) "
+                        "WHERE e.name IN $names "
+                        "RETURN e.name AS entity_name, s.url AS source_url, "
+                        "       s.title AS source_title, "
+                        "       s.credibility_score AS credibility_score, "
+                        "       s.domain AS domain",
+                        names=entity_names,
+                    )
+                else:
+                    result = await session.run(
+                        f"MATCH (e:{all_labels})-[:SOURCED_FROM]->(s:Document) "
+                        "RETURN e.name AS entity_name, s.url AS source_url, "
+                        "       s.title AS source_title, "
+                        "       s.credibility_score AS credibility_score, "
+                        "       s.domain AS domain "
+                        "LIMIT 50"
+                    )
+                records = await result.data()
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Provenance query failed: %s", exc)
+                return []
+
+        return [
+            {
+                "entity_name": rec.get("entity_name", ""),
+                "source_url": rec.get("source_url", ""),
+                "source_title": rec.get("source_title", ""),
+                "credibility_score": rec.get("credibility_score", 0.0),
+                "domain": rec.get("domain", ""),
+            }
+            for rec in records
+        ]
 
     # ------------------------------------------------------------------
     # Graph-aware recall (the main query interface)
@@ -1271,6 +2207,9 @@ class KnowledgeGraph:
         min_confidence: float = 0.0,
         include_contradictions: bool = False,
         include_provenance: bool = False,
+        include_claims: bool = True,
+        include_documents: bool = False,
+        node_types: Optional[List[str]] = None,
     ) -> str:
         """
         Build a structured text context from the knowledge graph for a query.
@@ -1278,33 +2217,16 @@ class KnowledgeGraph:
         1. Vector-search entities relevant to the query
         2. Traverse 1–N hops of relationships from those entities
         3. Retrieve community summaries for the entity clusters
-        4. Optionally append contradictions and source provenance
+        4. Optionally append claims, documents, contradictions, provenance
         5. Return formatted text
-
-        Parameters
-        ----------
-        query:
-            Natural-language query to seed entity search.
-        entity_limit:
-            Maximum number of seed entities to retrieve.
-        max_hops:
-            Relationship traversal depth (1 = direct only, 2 = one middle node).
-        min_confidence:
-            Only include RELATES_TO edges at or above this confidence score.
-        include_contradictions:
-            Append a KNOWN CONTRADICTIONS section when conflicts exist for
-            the seed entities.
-        include_provenance:
-            Append a SOURCE PROVENANCE section listing source URLs for the
-            seed entities.
-
-        Returns an empty string if the graph has no relevant data.
         """
         if not self.available:
             return ""
 
         # Step 1: find seed entities
-        entities = await self.find_entities(query, limit=entity_limit)
+        entities = await self.find_entities(
+            query, limit=entity_limit, node_types=node_types
+        )
         if not entities:
             return ""
 
@@ -1325,7 +2247,27 @@ class KnowledgeGraph:
         if entities:
             parts.append("KNOWN ENTITIES:")
             for e in entities:
-                line = f"  • {e['name']} ({e['entity_type']})"
+                label = e.get("entity_label", "Concept")
+                line = f"  [{label}] {e['name']}"
+                # Type-specific detail
+                detail_parts: List[str] = []
+                if e.get("affiliation"):
+                    detail_parts.append(e["affiliation"])
+                if e.get("tech_category"):
+                    detail_parts.append(e["tech_category"])
+                if e.get("maturity"):
+                    detail_parts.append(e["maturity"])
+                if e.get("org_type"):
+                    detail_parts.append(e["org_type"])
+                if e.get("start_date"):
+                    date_str = e["start_date"]
+                    if e.get("end_date"):
+                        date_str += f" → {e['end_date']}"
+                    detail_parts.append(date_str)
+                if e.get("value") is not None and e.get("unit"):
+                    detail_parts.append(f"{e['value']} {e['unit']}")
+                if detail_parts:
+                    line += f" ({', '.join(detail_parts)})"
                 if e.get("mention_count", 1) > 1:
                     line += f" — seen {e['mention_count']}x"
                 if e.get("ancestors"):
@@ -1334,12 +2276,13 @@ class KnowledgeGraph:
 
         if relationships:
             parts.append("\nKNOWN RELATIONSHIPS:")
-            seen_triples: set[str] = set()
+            seen_triples: Set[str] = set()
             for r in relationships:
                 # Filter by minimum confidence when specified
                 if min_confidence > 0.0 and r.get("confidence", 1.0) < min_confidence:
                     continue
-                triple = f"{r['source_entity']} → {r['relation_type']} → {r['target_entity']}"
+                rel_label = r.get("relationship_label", "RELATES_TO")
+                triple = f"{r['source_entity']} ─{rel_label}→ {r['target_entity']}"
                 if triple in seen_triples:
                     continue
                 seen_triples.add(triple)
@@ -1347,12 +2290,37 @@ class KnowledgeGraph:
                 conf_str = f" (conf: {conf:.2f})" if conf < 0.8 else ""
                 parts.append(f"  • {triple}{conf_str}")
 
+        # Claims
+        if include_claims and entity_names:
+            try:
+                all_claims: List[Dict[str, Any]] = []
+                for ename in entity_names[:3]:
+                    claims = await self.find_claims(entity_name=ename, limit=3)
+                    all_claims.extend(claims)
+                # Dedup by id
+                seen_claim_ids: Set[str] = set()
+                unique_claims: List[Dict[str, Any]] = []
+                for c in all_claims:
+                    if c["id"] not in seen_claim_ids:
+                        seen_claim_ids.add(c["id"])
+                        unique_claims.append(c)
+                if unique_claims:
+                    parts.append("\nCLAIMS:")
+                    for c in unique_claims[:5]:
+                        status_tag = c.get("status", "unverified")
+                        conf = c.get("confidence", 0.0)
+                        parts.append(
+                            f"  • \"{c['text'][:120]}\" ({status_tag}, conf: {conf:.2f})"
+                        )
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] Claim recall skipped: %s", exc)
+
         if communities:
             parts.append("\nTHEMATIC CLUSTERS:")
             for c in communities:
                 parts.append(f"  [{c['topic']}] {c['summary']}")
 
-        # Step 5 (optional): contradictions
+        # Optional: contradictions
         if include_contradictions:
             try:
                 contradictions = await self.find_contradictions(
@@ -1368,12 +2336,12 @@ class KnowledgeGraph:
             except Exception as exc:
                 logger.debug("[KnowledgeGraph] Contradiction recall skipped: %s", exc)
 
-        # Step 6 (optional): provenance
-        if include_provenance:
+        # Optional: provenance / documents
+        if include_provenance or include_documents:
             try:
                 provenance = await self.get_provenance(entity_names=entity_names[:3])
                 if provenance:
-                    parts.append("\nSOURCE PROVENANCE:")
+                    parts.append("\nSOURCE DOCUMENTS:")
                     for p in provenance[:5]:
                         cred = p.get("credibility_score", 0.5)
                         parts.append(
@@ -1397,27 +2365,32 @@ class KnowledgeGraph:
                 "relationships": 0,
                 "communities": 0,
                 "contradictions": 0,
-                "sources": 0,
+                "documents": 0,
+                "claims": 0,
                 "hierarchies": 0,
             }
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "CALL { MATCH (e:Entity) RETURN count(e) AS c } "
+                    f"CALL {{ MATCH (e:{all_labels}) RETURN count(e) AS c }} "
                     "WITH c AS entities "
-                    "CALL { MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS c } "
+                    f"CALL {{ MATCH ()-[r:{_FACTUAL_REL_CYPHER}]->() RETURN count(r) AS c }} "
                     "WITH entities, c AS relationships "
                     "CALL { MATCH (co:Community) RETURN count(co) AS c } "
                     "WITH entities, relationships, c AS communities "
                     "CALL { MATCH ()-[r:CONTRADICTS]->() RETURN count(r) AS c } "
                     "WITH entities, relationships, communities, c AS contradictions "
-                    "CALL { MATCH (s:Source) RETURN count(s) AS c } "
-                    "WITH entities, relationships, communities, contradictions, c AS sources "
+                    "CALL { MATCH (d:Document) RETURN count(d) AS c } "
+                    "WITH entities, relationships, communities, contradictions, c AS documents "
+                    "CALL { MATCH (cl:Claim) RETURN count(cl) AS c } "
+                    "WITH entities, relationships, communities, contradictions, documents, c AS claims "
                     "CALL { MATCH ()-[r:IS_A]->() RETURN count(r) AS c } "
                     "RETURN entities, relationships, communities, contradictions, "
-                    "       sources, c AS hierarchies"
+                    "       documents, claims, c AS hierarchies"
                 )
                 record = await result.single()
                 if record:
@@ -1426,7 +2399,8 @@ class KnowledgeGraph:
                         "relationships": record["relationships"],
                         "communities": record["communities"],
                         "contradictions": record["contradictions"],
-                        "sources": record["sources"],
+                        "documents": record["documents"],
+                        "claims": record["claims"],
                         "hierarchies": record["hierarchies"],
                     }
             except Exception as exc:
@@ -1437,7 +2411,8 @@ class KnowledgeGraph:
             "relationships": 0,
             "communities": 0,
             "contradictions": 0,
-            "sources": 0,
+            "documents": 0,
+            "claims": 0,
             "hierarchies": 0,
         }
 
@@ -1463,11 +2438,13 @@ class KnowledgeGraph:
             return {"success": False, "message": "Self-hierarchy not allowed"}
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (child:Entity {name: $child}) "
-                    "MATCH (parent:Entity {name: $parent}) "
+                    f"MATCH (child:{all_labels} {{name: $child}}) "
+                    f"MATCH (parent:{all_labels} {{name: $parent}}) "
                     "MERGE (child)-[:IS_A]->(parent) "
                     "RETURN 'ok' AS result",
                     child=child_name.strip(),
@@ -1492,11 +2469,10 @@ class KnowledgeGraph:
         explanation: str = "",
         session_id: str = "",
     ) -> Dict[str, Any]:
-        """Record that two RELATES_TO relationships contradict each other.
+        """Record that two relationships contradict each other.
 
         Creates a CONTRADICTS edge between the *source* entities of the two
-        relationships, carrying both relationship IDs and an explanation so the
-        planner can surface the conflict and design resolution steps.
+        relationships, carrying both relationship IDs and an explanation.
         """
         if not self.available:
             return {"success": False, "message": "Graph not available"}
@@ -1505,11 +2481,12 @@ class KnowledgeGraph:
         now = datetime.now().isoformat()
         cid = str(uuid.uuid4())
 
+        # Match any factual relationship type for both IDs
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH ()-[r1:RELATES_TO {id: $id_a}]->() "
-                    "MATCH ()-[r2:RELATES_TO {id: $id_b}]->() "
+                    f"MATCH ()-[r1:{_FACTUAL_REL_CYPHER} {{id: $id_a}}]->() "
+                    f"MATCH ()-[r2:{_FACTUAL_REL_CYPHER} {{id: $id_b}}]->() "
                     "WITH startNode(r1) AS e1, startNode(r2) AS e2 "
                     "CREATE (e1)-[:CONTRADICTS { "
                     "  id: $cid, rel_id_a: $id_a, rel_id_b: $id_b, "
@@ -1545,14 +2522,16 @@ class KnowledgeGraph:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 if entity_names:
                     result = await session.run(
-                        "MATCH (e1:Entity)-[c:CONTRADICTS]->(e2:Entity) "
+                        f"MATCH (e1:{all_labels})-[c:CONTRADICTS]->(e2:{all_labels}) "
                         "WHERE e1.name IN $names OR e2.name IN $names "
-                        "OPTIONAL MATCH ()-[r1:RELATES_TO {id: c.rel_id_a}]->() "
-                        "OPTIONAL MATCH ()-[r2:RELATES_TO {id: c.rel_id_b}]->() "
+                        f"OPTIONAL MATCH ()-[r1:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_a}}]->() "
+                        f"OPTIONAL MATCH ()-[r2:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_b}}]->() "
                         "RETURN e1.name AS entity_a, e2.name AS entity_b, "
                         "       c.explanation AS explanation, c.id AS id, "
                         "       r1.relation_type AS rel_a_type, "
@@ -1565,9 +2544,9 @@ class KnowledgeGraph:
                     )
                 else:
                     result = await session.run(
-                        "MATCH (e1:Entity)-[c:CONTRADICTS]->(e2:Entity) "
-                        "OPTIONAL MATCH ()-[r1:RELATES_TO {id: c.rel_id_a}]->() "
-                        "OPTIONAL MATCH ()-[r2:RELATES_TO {id: c.rel_id_b}]->() "
+                        f"MATCH (e1:{all_labels})-[c:CONTRADICTS]->(e2:{all_labels}) "
+                        f"OPTIONAL MATCH ()-[r1:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_a}}]->() "
+                        f"OPTIONAL MATCH ()-[r2:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_b}}]->() "
                         "RETURN e1.name AS entity_a, e2.name AS entity_b, "
                         "       c.explanation AS explanation, c.id AS id, "
                         "       r1.relation_type AS rel_a_type, "
@@ -1597,129 +2576,6 @@ class KnowledgeGraph:
         ]
 
     # ------------------------------------------------------------------
-    # Source provenance
-    # ------------------------------------------------------------------
-
-    async def store_source(
-        self,
-        url: str,
-        title: str = "",
-        credibility_score: float = 0.5,
-    ) -> Dict[str, Any]:
-        """Upsert a Source node (unique by URL).
-
-        On conflict, title is updated only if the new value is non-empty;
-        credibility_score is updated to the higher of the two values.
-        """
-        if not self.available:
-            return {"success": False, "message": "Graph not available"}
-        if not url or not url.strip().startswith("http"):
-            return {"success": False, "message": "Invalid URL"}
-
-        assert self._driver is not None
-        from urllib.parse import urlparse
-
-        domain = urlparse(url.strip()).netloc or ""
-        now = datetime.now().isoformat()
-
-        async with self._driver.session(database=self._database) as session:
-            try:
-                await session.run(
-                    "MERGE (s:Source {url: $url}) "
-                    "ON CREATE SET s.title = $title, "
-                    "              s.credibility_score = $credibility_score, "
-                    "              s.domain = $domain, "
-                    "              s.first_seen = $now "
-                    "ON MATCH SET  s.title = CASE WHEN $title <> '' THEN $title ELSE s.title END, "
-                    "              s.credibility_score = CASE "
-                    "                WHEN $credibility_score > s.credibility_score "
-                    "                THEN $credibility_score ELSE s.credibility_score END",
-                    url=url.strip(),
-                    title=title.strip(),
-                    credibility_score=credibility_score,
-                    domain=domain,
-                    now=now,
-                )
-                return {"success": True, "url": url.strip()}
-            except Exception as exc:
-                logger.error("[KnowledgeGraph] Source store failed: %s", exc)
-                return {"success": False, "message": str(exc)}
-
-    async def link_to_source(
-        self,
-        entity_name: str,
-        source_url: str,
-    ) -> Dict[str, Any]:
-        """Create a SOURCED_FROM edge from an Entity to a Source node."""
-        if not self.available:
-            return {"success": False, "message": "Graph not available"}
-
-        assert self._driver is not None
-        async with self._driver.session(database=self._database) as session:
-            try:
-                result = await session.run(
-                    "MATCH (e:Entity {name: $name}) "
-                    "MATCH (s:Source {url: $url}) "
-                    "MERGE (e)-[:SOURCED_FROM]->(s) "
-                    "RETURN 'ok' AS result",
-                    name=entity_name.strip(),
-                    url=source_url.strip(),
-                )
-                record = await result.single()
-                if record:
-                    return {"success": True}
-                return {"success": False, "message": "Entity or source not found"}
-            except Exception as exc:
-                logger.debug("[KnowledgeGraph] Source link failed: %s", exc)
-                return {"success": False, "message": str(exc)}
-
-    async def get_provenance(
-        self,
-        entity_names: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
-        """Return source nodes linked to the given entities via SOURCED_FROM."""
-        if not self.available:
-            return []
-
-        assert self._driver is not None
-        async with self._driver.session(database=self._database) as session:
-            try:
-                if entity_names:
-                    result = await session.run(
-                        "MATCH (e:Entity)-[:SOURCED_FROM]->(s:Source) "
-                        "WHERE e.name IN $names "
-                        "RETURN e.name AS entity_name, s.url AS source_url, "
-                        "       s.title AS source_title, "
-                        "       s.credibility_score AS credibility_score, "
-                        "       s.domain AS domain",
-                        names=entity_names,
-                    )
-                else:
-                    result = await session.run(
-                        "MATCH (e:Entity)-[:SOURCED_FROM]->(s:Source) "
-                        "RETURN e.name AS entity_name, s.url AS source_url, "
-                        "       s.title AS source_title, "
-                        "       s.credibility_score AS credibility_score, "
-                        "       s.domain AS domain "
-                        "LIMIT 50"
-                    )
-                records = await result.data()
-            except Exception as exc:
-                logger.debug("[KnowledgeGraph] Provenance query failed: %s", exc)
-                return []
-
-        return [
-            {
-                "entity_name": rec.get("entity_name", ""),
-                "source_url": rec.get("source_url", ""),
-                "source_title": rec.get("source_title", ""),
-                "credibility_score": rec.get("credibility_score", 0.0),
-                "domain": rec.get("domain", ""),
-            }
-            for rec in records
-        ]
-
-    # ------------------------------------------------------------------
     # Temporal / recency queries
     # ------------------------------------------------------------------
 
@@ -1728,20 +2584,18 @@ class KnowledgeGraph:
         since_date: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Return entities added or confirmed since the given ISO-8601 date string.
-
-        If *since_date* is None the most recently confirmed entities are
-        returned regardless of age.
-        """
+        """Return entities added or confirmed since the given ISO-8601 date string."""
         if not self.available:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 if since_date:
                     result = await session.run(
-                        "MATCH (e:Entity) "
+                        f"MATCH (e:{all_labels}) "
                         "WHERE e.last_confirmed >= $since_date "
                         "RETURN e ORDER BY e.last_confirmed DESC LIMIT $limit",
                         since_date=since_date,
@@ -1749,7 +2603,7 @@ class KnowledgeGraph:
                     )
                 else:
                     result = await session.run(
-                        "MATCH (e:Entity) "
+                        f"MATCH (e:{all_labels}) "
                         "RETURN e ORDER BY e.last_confirmed DESC LIMIT $limit",
                         limit=limit,
                     )
@@ -1763,6 +2617,9 @@ class KnowledgeGraph:
                 "id": rec["e"].get("id", ""),
                 "name": rec["e"].get("name", ""),
                 "entity_type": rec["e"].get("entity_type", ""),
+                "entity_label": resolve_entity_label(
+                    rec["e"].get("entity_type", "concept")
+                ),
                 "mention_count": rec["e"].get("mention_count", 1),
                 "last_confirmed": rec["e"].get("last_confirmed", ""),
             }
@@ -1774,18 +2631,21 @@ class KnowledgeGraph:
         since_date: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Return RELATES_TO edges created or confirmed since *since_date*."""
+        """Return factual edges created or confirmed since *since_date*."""
         if not self.available:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 if since_date:
                     result = await session.run(
-                        "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
+                        f"MATCH (s:{all_labels})-[r:{_FACTUAL_REL_CYPHER}]->(t:{all_labels}) "
                         "WHERE r.last_confirmed >= $since_date "
                         "RETURN s.name AS source_entity, r.relation_type AS relation_type, "
+                        "       type(r) AS relationship_label, "
                         "       t.name AS target_entity, r.confidence AS confidence, "
                         "       r.last_confirmed AS last_confirmed "
                         "ORDER BY r.last_confirmed DESC LIMIT $limit",
@@ -1794,8 +2654,9 @@ class KnowledgeGraph:
                     )
                 else:
                     result = await session.run(
-                        "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
+                        f"MATCH (s:{all_labels})-[r:{_FACTUAL_REL_CYPHER}]->(t:{all_labels}) "
                         "RETURN s.name AS source_entity, r.relation_type AS relation_type, "
+                        "       type(r) AS relationship_label, "
                         "       t.name AS target_entity, r.confidence AS confidence, "
                         "       r.last_confirmed AS last_confirmed "
                         "ORDER BY r.last_confirmed DESC LIMIT $limit",
@@ -1810,6 +2671,7 @@ class KnowledgeGraph:
             {
                 "source_entity": rec.get("source_entity", ""),
                 "relation_type": rec.get("relation_type", ""),
+                "relationship_label": rec.get("relationship_label", "RELATES_TO"),
                 "target_entity": rec.get("target_entity", ""),
                 "confidence": rec.get("confidence", 0.0),
                 "last_confirmed": rec.get("last_confirmed", ""),
@@ -1826,10 +2688,12 @@ class KnowledgeGraph:
             return {"entities": [], "relationships": []}
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 ent_result = await session.run(
-                    "MATCH (e:Entity) "
+                    f"MATCH (e:{all_labels}) "
                     "WHERE $session_id IN e.source_sessions OR "
                     "      e.source_sessions CONTAINS $session_id "
                     "RETURN e.name AS name, e.entity_type AS entity_type, "
@@ -1840,15 +2704,19 @@ class KnowledgeGraph:
                     {
                         "name": r.get("name", ""),
                         "entity_type": r.get("entity_type", ""),
+                        "entity_label": resolve_entity_label(
+                            r.get("entity_type", "concept")
+                        ),
                         "description": r.get("description", ""),
                     }
                     for r in await ent_result.data()
                 ]
 
                 rel_result = await session.run(
-                    "MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity) "
+                    f"MATCH (s:{all_labels})-[r:{_FACTUAL_REL_CYPHER}]->(t:{all_labels}) "
                     "WHERE r.session_id = $session_id "
                     "RETURN s.name AS source_entity, r.relation_type AS relation_type, "
+                    "       type(r) AS relationship_label, "
                     "       t.name AS target_entity, r.confidence AS confidence",
                     session_id=session_id,
                 )
@@ -1856,6 +2724,7 @@ class KnowledgeGraph:
                     {
                         "source_entity": r.get("source_entity", ""),
                         "relation_type": r.get("relation_type", ""),
+                        "relationship_label": r.get("relationship_label", "RELATES_TO"),
                         "target_entity": r.get("target_entity", ""),
                         "confidence": r.get("confidence", 0.0),
                     }
@@ -1879,27 +2748,26 @@ class KnowledgeGraph:
     ) -> List[Dict[str, Any]]:
         """Find shortest paths between two named entities.
 
-        Traverses both RELATES_TO and IS_A edges.  Returns up to 5 paths,
-        each as a dict with ``node_names`` (ordered list of entity names along
-        the path) and ``path_length``.
-
-        Returns [] if no path exists within *max_depth* hops or either entity
-        is not in the graph.
+        Traverses all factual relationship types plus IS_A.
         """
         if not self.available:
             return []
         if not source_name.strip() or not target_name.strip():
             return []
-        # Guard: max_depth bounds to prevent combinatorial explosion
         max_depth = min(max_depth, 6)
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (src:Entity {name: $source}), (tgt:Entity {name: $target}) "
+                    f"MATCH (src:{all_labels} {{name: $source}}), "
+                    f"      (tgt:{all_labels} {{name: $target}}) "
                     "MATCH p = shortestPath("
-                    "  (src)-[:RELATES_TO|IS_A*1.." + str(max_depth) + "]-(tgt)"
+                    f"  (src)-[:{_FACTUAL_REL_CYPHER}|IS_A*1.."
+                    + str(max_depth)
+                    + "]-(tgt)"
                     ") "
                     "RETURN [n IN nodes(p) | n.name] AS node_names, "
                     "       length(p) AS path_length "
@@ -1925,19 +2793,17 @@ class KnowledgeGraph:
         entity_names: List[str],
         min_shared: int = 2,
     ) -> List[Dict[str, Any]]:
-        """Return entities connected to at least *min_shared* of the named entities.
-
-        Useful for surfacing hidden bridge concepts that link multiple seed
-        entities without being directly listed as results.
-        """
+        """Return entities connected to at least *min_shared* of the named entities."""
         if not self.available or not entity_names:
             return []
 
         assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+
         async with self._driver.session(database=self._database) as session:
             try:
                 result = await session.run(
-                    "MATCH (seed:Entity)-[:RELATES_TO]-(common:Entity) "
+                    f"MATCH (seed:{all_labels})-[:{_FACTUAL_REL_CYPHER}]-(common:{all_labels}) "
                     "WHERE seed.name IN $names AND NOT common.name IN $names "
                     "WITH common, count(DISTINCT seed) AS shared_count "
                     "WHERE shared_count >= $min_shared "
@@ -1970,43 +2836,46 @@ class KnowledgeGraph:
         self,
         half_life_days: int = 30,
     ) -> int:
-        """Exponentially decay the confidence of RELATES_TO edges not confirmed recently.
+        """Exponentially decay the confidence of factual edges not confirmed recently.
 
-        Uses the formula: ``new_confidence = confidence × 2^(−days_since_confirmed / half_life)``
-
-        Edges with ``last_confirmed`` set to NULL are skipped (no decay applied
-        to legacy edges that predate temporal tracking).  Confidence is floored
-        at 0.01 to prevent complete erasure.
-
-        Returns the number of edges updated.
+        Applies to ALL typed factual relationship labels, not just RELATES_TO.
         """
         if not self.available or half_life_days <= 0:
             return 0
 
         assert self._driver is not None
+        total_updated = 0
+
         async with self._driver.session(database=self._database) as session:
-            try:
-                result = await session.run(
-                    "MATCH ()-[r:RELATES_TO]->() "
-                    "WHERE r.last_confirmed IS NOT NULL "
-                    "WITH r, "
-                    "     toInteger("
-                    "       (datetime().epochSeconds "
-                    "        - datetime(r.last_confirmed).epochSeconds) / 86400"
-                    "     ) AS days_old "
-                    "WHERE days_old > 0 "
-                    "WITH r, days_old, "
-                    "     r.confidence * exp(-0.693 * toFloat(days_old) / $half_life) "
-                    "     AS decayed "
-                    "SET r.confidence = CASE WHEN decayed < 0.01 THEN 0.01 ELSE decayed END "
-                    "RETURN count(r) AS updated",
-                    half_life=float(half_life_days),
-                )
-                record = await result.single()
-                return record["updated"] if record else 0
-            except Exception as exc:
-                logger.debug("[KnowledgeGraph] decay_confidence failed: %s", exc)
-                return 0
+            for rel_type in _FACTUAL_REL_TYPES:
+                try:
+                    result = await session.run(
+                        f"MATCH ()-[r:{rel_type}]->() "
+                        "WHERE r.last_confirmed IS NOT NULL "
+                        "WITH r, "
+                        "     toInteger("
+                        "       (datetime().epochSeconds "
+                        "        - datetime(r.last_confirmed).epochSeconds) / 86400"
+                        "     ) AS days_old "
+                        "WHERE days_old > 0 "
+                        "WITH r, days_old, "
+                        "     r.confidence * exp(-0.693 * toFloat(days_old) / $half_life) "
+                        "     AS decayed "
+                        "SET r.confidence = CASE WHEN decayed < 0.01 THEN 0.01 ELSE decayed END "
+                        "RETURN count(r) AS updated",
+                        half_life=float(half_life_days),
+                    )
+                    record = await result.single()
+                    if record:
+                        total_updated += record["updated"]
+                except Exception as exc:
+                    logger.debug(
+                        "[KnowledgeGraph] decay_confidence failed for %s: %s",
+                        rel_type,
+                        exc,
+                    )
+
+        return total_updated
 
     # ------------------------------------------------------------------
     # Graph pruning
@@ -2020,89 +2889,80 @@ class KnowledgeGraph:
     ) -> Dict[str, int]:
         """Remove stale, low-confidence graph elements.
 
-        Prunes in three passes:
+        Prunes in four passes:
 
-        1. **Stale relationships** — RELATES_TO edges where confidence has
+        1. **Stale relationships** — factual edges where confidence has
            decayed below *min_confidence* OR where ``last_confirmed`` is more
            than *max_age_days* old.
-        2. **Orphaned entities** — Entity nodes left with no RELATES_TO,
+        2. **Orphaned entities** — typed entity nodes left with no factual,
            IS_A, SOURCED_FROM, or MEMBER_OF edges after pass 1.
         3. **Dangling CONTRADICTS edges** — CONTRADICTS edges whose referenced
-           ``rel_id_a`` / ``rel_id_b`` no longer exist in the graph.
-
-        Parameters
-        ----------
-        min_confidence:
-            Delete RELATES_TO edges whose confidence has fallen below this
-            floor (after decay).  Default 0.1.
-        max_age_days:
-            Delete RELATES_TO edges whose ``last_confirmed`` timestamp is
-            older than this many days, regardless of confidence.  Set to 0 to
-            disable age-based pruning.  Default 180.
-        dry_run:
-            When True (default) only *counts* what would be deleted without
-            actually removing anything.  Set to False to execute the deletes.
-
-        Returns
-        -------
-        dict with keys ``relationships``, ``entities``, ``contradictions``
-        containing the count of items deleted (or would-be-deleted in dry_run).
+           relationship IDs no longer exist in the graph.
+        4. **Orphaned claims** — Claim nodes with no ASSERTS edges.
         """
         if not self.available:
-            return {"relationships": 0, "entities": 0, "contradictions": 0}
+            return {"relationships": 0, "entities": 0, "contradictions": 0, "claims": 0}
 
         assert self._driver is not None
         results: Dict[str, int] = {
             "relationships": 0,
             "entities": 0,
             "contradictions": 0,
+            "claims": 0,
         }
+        all_labels = "|".join(ENTITY_TYPES)
 
         async with self._driver.session(database=self._database) as session:
-            # ── Pass 1: stale relationships ────────────────────────────────
-            try:
-                age_clause = ""
-                params: Dict[str, Any] = {"min_conf": min_confidence}
-                if max_age_days > 0:
-                    params["max_age_days"] = float(max_age_days)
-                    age_clause = (
-                        " OR ("
-                        "r.last_confirmed IS NOT NULL AND "
-                        "toInteger("
-                        "  (datetime().epochSeconds "
-                        "   - datetime(r.last_confirmed).epochSeconds) / 86400"
-                        ") > $max_age_days"
-                        ")"
-                    )
+            # ── Pass 1: stale relationships (all factual types) ────────────
+            for rel_type in _FACTUAL_REL_TYPES:
+                try:
+                    age_clause = ""
+                    params: Dict[str, Any] = {"min_conf": min_confidence}
+                    if max_age_days > 0:
+                        params["max_age_days"] = float(max_age_days)
+                        age_clause = (
+                            " OR ("
+                            "r.last_confirmed IS NOT NULL AND "
+                            "toInteger("
+                            "  (datetime().epochSeconds "
+                            "   - datetime(r.last_confirmed).epochSeconds) / 86400"
+                            ") > $max_age_days"
+                            ")"
+                        )
 
-                count_q = (
-                    "MATCH ()-[r:RELATES_TO]->() "
-                    f"WHERE r.confidence < $min_conf{age_clause} "
-                    "RETURN count(r) AS cnt"
-                )
-                cnt_result = await session.run(count_q, **params)
-                cnt_record = await cnt_result.single()
-                rel_count = cnt_record["cnt"] if cnt_record else 0
-                results["relationships"] = rel_count
-
-                if not dry_run and rel_count > 0:
-                    delete_q = (
-                        "MATCH ()-[r:RELATES_TO]->() "
+                    count_q = (
+                        f"MATCH ()-[r:{rel_type}]->() "
                         f"WHERE r.confidence < $min_conf{age_clause} "
-                        "DELETE r"
+                        "RETURN count(r) AS cnt"
                     )
-                    await session.run(delete_q, **params)
-                    logger.info(
-                        "[KnowledgeGraph] Pruned %d stale relationships.", rel_count
+                    cnt_result = await session.run(count_q, **params)
+                    cnt_record = await cnt_result.single()
+                    rel_count = cnt_record["cnt"] if cnt_record else 0
+                    results["relationships"] += rel_count
+
+                    if not dry_run and rel_count > 0:
+                        delete_q = (
+                            f"MATCH ()-[r:{rel_type}]->() "
+                            f"WHERE r.confidence < $min_conf{age_clause} "
+                            "DELETE r"
+                        )
+                        await session.run(delete_q, **params)
+                except Exception as exc:
+                    logger.debug(
+                        "[KnowledgeGraph] prune (rel %s) failed: %s", rel_type, exc
                     )
-            except Exception as exc:
-                logger.debug("[KnowledgeGraph] prune (relationships) failed: %s", exc)
+
+            if not dry_run and results["relationships"] > 0:
+                logger.info(
+                    "[KnowledgeGraph] Pruned %d stale relationships.",
+                    results["relationships"],
+                )
 
             # ── Pass 2: orphaned entities ─────────────────────────────────
             try:
                 orphan_q = (
-                    "MATCH (e:Entity) "
-                    "WHERE NOT (e)-[:RELATES_TO]-() "
+                    f"MATCH (e:{all_labels}) "
+                    f"WHERE NOT (e)-[:{_FACTUAL_REL_CYPHER}]-() "
                     "  AND NOT (e)-[:IS_A]-() "
                     "  AND NOT (e)-[:SOURCED_FROM]->() "
                     "  AND NOT (e)-[:MEMBER_OF]->() "
@@ -2115,8 +2975,8 @@ class KnowledgeGraph:
 
                 if not dry_run and ent_count > 0:
                     await session.run(
-                        "MATCH (e:Entity) "
-                        "WHERE NOT (e)-[:RELATES_TO]-() "
+                        f"MATCH (e:{all_labels}) "
+                        f"WHERE NOT (e)-[:{_FACTUAL_REL_CYPHER}]-() "
                         "  AND NOT (e)-[:IS_A]-() "
                         "  AND NOT (e)-[:SOURCED_FROM]->() "
                         "  AND NOT (e)-[:MEMBER_OF]->() "
@@ -2131,9 +2991,9 @@ class KnowledgeGraph:
             # ── Pass 3: dangling CONTRADICTS edges ─────────────────────────
             try:
                 dangle_q = (
-                    "MATCH (e1:Entity)-[c:CONTRADICTS]->(e2:Entity) "
-                    "WHERE NOT EXISTS { MATCH ()-[r:RELATES_TO {id: c.rel_id_a}]->() } "
-                    "   OR NOT EXISTS { MATCH ()-[r:RELATES_TO {id: c.rel_id_b}]->() } "
+                    f"MATCH (e1:{all_labels})-[c:CONTRADICTS]->(e2:{all_labels}) "
+                    f"WHERE NOT EXISTS {{ MATCH ()-[r:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_a}}]->() }} "
+                    f"   OR NOT EXISTS {{ MATCH ()-[r:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_b}}]->() }} "
                     "RETURN count(c) AS cnt"
                 )
                 cnt_result = await session.run(dangle_q)
@@ -2143,9 +3003,9 @@ class KnowledgeGraph:
 
                 if not dry_run and contra_count > 0:
                     await session.run(
-                        "MATCH (e1:Entity)-[c:CONTRADICTS]->(e2:Entity) "
-                        "WHERE NOT EXISTS { MATCH ()-[r:RELATES_TO {id: c.rel_id_a}]->() } "
-                        "   OR NOT EXISTS { MATCH ()-[r:RELATES_TO {id: c.rel_id_b}]->() } "
+                        f"MATCH (e1:{all_labels})-[c:CONTRADICTS]->(e2:{all_labels}) "
+                        f"WHERE NOT EXISTS {{ MATCH ()-[r:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_a}}]->() }} "
+                        f"   OR NOT EXISTS {{ MATCH ()-[r:{_FACTUAL_REL_CYPHER} {{id: c.rel_id_b}}]->() }} "
                         "DELETE c"
                     )
                     logger.info(
@@ -2154,5 +3014,27 @@ class KnowledgeGraph:
                     )
             except Exception as exc:
                 logger.debug("[KnowledgeGraph] prune (contradictions) failed: %s", exc)
+
+            # ── Pass 4: orphaned claims ────────────────────────────────────
+            try:
+                claim_q = (
+                    "MATCH (cl:Claim) "
+                    "WHERE NOT (cl)-[:ASSERTS]->() "
+                    "RETURN count(cl) AS cnt"
+                )
+                cnt_result = await session.run(claim_q)
+                cnt_record = await cnt_result.single()
+                claim_count = cnt_record["cnt"] if cnt_record else 0
+                results["claims"] = claim_count
+
+                if not dry_run and claim_count > 0:
+                    await session.run(
+                        "MATCH (cl:Claim) " "WHERE NOT (cl)-[:ASSERTS]->() " "DELETE cl"
+                    )
+                    logger.info(
+                        "[KnowledgeGraph] Pruned %d orphaned claims.", claim_count
+                    )
+            except Exception as exc:
+                logger.debug("[KnowledgeGraph] prune (claims) failed: %s", exc)
 
         return results

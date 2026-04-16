@@ -288,7 +288,14 @@ def test_ltm_neo4j_schema_setup():
 
     schema_src = ast.get_source_segment(src, schema_method) or ""
     assert "memory_id" in schema_src, "_create_schema must create memory_id constraint"
-    assert "entity_id" in schema_src, "_create_schema must create entity_id constraint"
+    # Typed entity labels: constraint + vector index are created in a loop
+    # over ENTITY_TYPES. Verify the loop and key fragments exist.
+    assert (
+        "ENTITY_TYPES" in schema_src or "for label in" in schema_src
+    ), "_create_schema must loop over entity types to create per-type constraints"
+    assert (
+        "_ENTITY_INDEX_NAMES" in schema_src or "embedding_idx" in schema_src
+    ), "_create_schema must create per-type vector indexes"
     assert (
         "community_id" in schema_src
     ), "_create_schema must create community_id constraint"
@@ -296,11 +303,22 @@ def test_ltm_neo4j_schema_setup():
         "memory_embedding_idx" in schema_src
     ), "_create_schema must create memory vector index"
     assert (
-        "entity_embedding_idx" in schema_src
-    ), "_create_schema must create entity vector index"
-    assert (
         "community_embedding_idx" in schema_src
     ), "_create_schema must create community vector index"
+    # Claim and Document nodes
+    assert "claim_id" in schema_src, "_create_schema must create claim_id constraint"
+    assert (
+        "claim_embedding_idx" in schema_src
+    ), "_create_schema must create claim vector index"
+    assert (
+        "document_id" in schema_src
+    ), "_create_schema must create document_id constraint"
+    assert (
+        "document_url" in schema_src
+    ), "_create_schema must create document_url constraint"
+    assert (
+        "document_embedding_idx" in schema_src
+    ), "_create_schema must create document vector index"
     print(
         "✅ AsyncLongTermMemory._create_schema creates all constraints and vector indexes"
     )
@@ -713,20 +731,27 @@ def test_ltm_knowledge_graph_collections():
     assert schema_method is not None, "_create_schema not found"
 
     schema_src = ast.get_source_segment(src, schema_method) or ""
-    # Must create vector indexes for all three node types
+    # Must create vector indexes — entity indexes are now per-type in a loop
     for idx_name in (
         "memory_embedding_idx",
-        "entity_embedding_idx",
         "community_embedding_idx",
     ):
         assert (
             idx_name in schema_src
         ), f"_create_schema must create '{idx_name}' vector index"
+    # Per-type entity indexes are created dynamically via ENTITY_TYPES loop
+    assert (
+        "ENTITY_TYPES" in schema_src or "_ENTITY_INDEX_NAMES" in schema_src
+    ), "_create_schema must create per-type entity vector indexes"
     # Must create uniqueness constraints
-    for constraint in ("memory_id", "entity_id", "community_id"):
+    for constraint in ("memory_id", "community_id"):
         assert (
             constraint in schema_src
         ), f"_create_schema must create '{constraint}' constraint"
+    # Per-type entity constraints are created dynamically
+    assert (
+        "IS UNIQUE" in schema_src
+    ), "_create_schema must create uniqueness constraints"
     print(
         "✅ AsyncLongTermMemory._create_schema creates all Neo4j indexes and constraints"
     )
@@ -1766,8 +1791,8 @@ def test_step_summary_expanded_input():
 
 
 def test_knowledge_graph_enhanced_schema():
-    """Verify _create_schema creates the Source constraint and that temporal
-    properties are written on entity creation/update."""
+    """Verify _create_schema creates the Document constraint (replacing old Source)
+    and that temporal properties are written on entity creation/update."""
     import ast
 
     with open("long_term_memory.py") as f:
@@ -1787,8 +1812,8 @@ def test_knowledge_graph_enhanced_schema():
     )
     schema_src = ast.get_source_segment(src, schema_method) or ""
     assert (
-        "source_url" in schema_src
-    ), "_create_schema must add Source node uniqueness constraint on url"
+        "document_url" in schema_src
+    ), "_create_schema must add Document node uniqueness constraint on url"
 
     # Verify temporal props are included in upsert_entity
     kg_class = next(
@@ -1914,13 +1939,18 @@ def test_prune_method_dry_run():
         "dry_run: bool = True" in prune_src
     ), "prune() dry_run must default to True (safe by default)"
 
-    # Three pruning passes
-    assert "RELATES_TO" in prune_src, "Pass 1: must prune RELATES_TO edges"
+    # Pruning passes — now uses _FACTUAL_REL_TYPES loop instead of hardcoded RELATES_TO
+    assert (
+        "_FACTUAL_REL_TYPES" in prune_src or "rel_type" in prune_src
+    ), "Pass 1: must prune stale edges across all factual relationship types"
     assert (
         "orphan" in prune_src.lower() or "NOT (e)-" in prune_src
     ), "Pass 2: must prune orphaned entities"
     assert "CONTRADICTS" in prune_src, "Pass 3: must prune dangling CONTRADICTS edges"
-    print("✅ prune() has dry_run=True default + three-pass pruning strategy")
+    assert (
+        "Claim" in prune_src or "claims" in prune_src
+    ), "Pass 4: must prune orphaned claims"
+    print("✅ prune() has dry_run=True default + four-pass pruning strategy")
 
 
 def test_orchestrator_graph_mutation_counter():
@@ -2005,13 +2035,16 @@ def test_orchestrator_enhanced_extraction_prompt():
         "store_hierarchy" in extract_src
     ), "_extract_graph_triples must call store_hierarchy when parent_type is provided"
     assert (
-        "store_source" in extract_src
-    ), "_extract_graph_triples must call store_source when source_url is provided"
+        "store_document" in extract_src
+    ), "_extract_graph_triples must call store_document when source_url is provided"
+    assert (
+        "store_claim" in extract_src
+    ), "_extract_graph_triples must call store_claim for extracted claims"
     assert (
         "recall_graph_context" in extract_src
     ), "_extract_graph_triples must inject existing graph context into the prompt"
     print(
-        "✅ _extract_graph_triples: enhanced prompt + IS_A hierarchy + provenance + context injection"
+        "✅ _extract_graph_triples: enhanced prompt + IS_A hierarchy + documents + claims + context injection"
     )
 
 

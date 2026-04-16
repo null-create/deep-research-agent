@@ -3387,18 +3387,34 @@ Return ONLY a JSON object:
         )
 
         extraction_prompt = (
-            "Extract entities and relationships from these research findings.\n"
+            "Extract entities, relationships, and claims from these research findings.\n"
             "Return ONLY valid JSON with this exact structure:\n"
             '{"entities": [{"name": "<entity name>", '
             '"type": "<person|organization|technology|concept|event|location|metric>", '
             '"description": "<one-sentence description>", '
-            '"parent_type": "<broader category name, or empty string>"}], '
+            '"parent_type": "<broader category name, or empty string>", '
+            '"properties": {"<type-specific key>": "<value>"}}], '
             '"relationships": [{"source": "<source entity name>", '
             '"target": "<target entity name>", '
             '"relation": "<verb phrase describing the relationship>", '
+            '"label": "<CAUSES|ENABLES|PREVENTS|REQUIRES|PART_OF|USES|PRODUCES|'
+            "COMPETES_WITH|AFFILIATED_WITH|AUTHORED_BY|FUNDED_BY|PRECEDED_BY|"
+            'OCCURRED_AT|SUPPORTS|REFUTES|MENTIONS|RELATES_TO>", '
             '"evidence": "<brief supporting evidence>", '
             '"source_url": "<source URL if explicitly mentioned, or empty string>", '
-            '"contradicts_prior": false}]}\n\n'
+            '"contradicts_prior": false}], '
+            '"claims": [{"text": "<assertion extracted from findings>", '
+            '"confidence": 0.8, '
+            '"entity_names": ["<entity mentioned in claim>"], '
+            '"source_url": "<URL if available, or empty string>"}]}\n\n'
+            "Type-specific properties by entity type:\n"
+            "  person: affiliation, role, expertise_areas (comma-separated)\n"
+            "  organization: org_type (company/academic/govt/ngo), industry, headquarters\n"
+            "  technology: tech_category (language/framework/db/tool/platform), version, license, maturity (emerging/stable/deprecated)\n"
+            "  event: start_date, end_date, event_type (conference/release/incident/discovery), location\n"
+            "  location: geo_type (city/country/region), parent_location\n"
+            "  metric: value, unit, measurement_date, trend (increasing/decreasing/stable)\n"
+            "  concept: domain, abstraction_level (specific/general/abstract)\n\n"
             "Findings:\n" + "\n".join(f"- {c}" for c in claim_texts) + graph_hint
         )
 
@@ -3437,11 +3453,19 @@ Return ONLY a JSON object:
                 name = entity.get("name", "").strip()
                 if not name:
                     continue
+                # Extract type-specific properties from the LLM response
+                type_props = entity.get("properties", {})
+                if isinstance(type_props, dict):
+                    # Clean empty string values
+                    type_props = {k: v for k, v in type_props.items() if v}
+                else:
+                    type_props = {}
                 result = await self._long_term_memory.graph.upsert_entity(
                     name=name,
                     entity_type=entity.get("type", "concept"),
                     description=entity.get("description", ""),
                     session_id=session_id,
+                    properties=type_props,
                 )
                 if result.get("success"):
                     stored_entities += 1
@@ -3468,6 +3492,8 @@ Return ONLY a JSON object:
                 relation = rel.get("relation", "").strip()
                 if not source or not target or not relation:
                     continue
+                # Pass explicit label if the LLM provided one
+                rel_label = rel.get("label", "").strip() or None
                 rel_result = await self._long_term_memory.graph.store_relationship(
                     source=source,
                     target=target,
@@ -3475,27 +3501,56 @@ Return ONLY a JSON object:
                     evidence=rel.get("evidence", ""),
                     session_id=session_id,
                     step_id=step.id,
+                    relationship_label=rel_label,
                 )
                 if rel_result.get("success"):
                     stored_rels += 1
-                    # Link to source URL if the LLM identified one
+                    # Store document and link if the LLM identified a source URL
                     source_url = rel.get("source_url", "").strip()
                     if source_url and source_url.startswith("http"):
-                        await self._long_term_memory.graph.store_source(url=source_url)
-                        await self._long_term_memory.graph.link_to_source(
-                            entity_name=source, source_url=source_url
+                        await self._long_term_memory.graph.store_document(
+                            url=source_url, session_id=session_id
+                        )
+                        await self._long_term_memory.graph.link_document_to_entity(
+                            document_url=source_url,
+                            entity_name=source,
+                            relationship_label="SOURCED_FROM",
                         )
 
-            if stored_entities or stored_rels:
+            # Store claims
+            extracted_claims = triples.get("claims", [])
+            stored_claims = 0
+            for claim_obj in extracted_claims:
+                claim_text = claim_obj.get("text", "").strip()
+                if not claim_text:
+                    continue
+                claim_result = await self._long_term_memory.graph.store_claim(
+                    text=claim_text,
+                    confidence=claim_obj.get("confidence", 0.5),
+                    source_session=session_id,
+                    step_id=step.id,
+                    entity_names=claim_obj.get("entity_names", []),
+                )
+                if claim_result.get("success"):
+                    stored_claims += 1
+                    # Link claim to source document if URL provided
+                    claim_url = claim_obj.get("source_url", "").strip()
+                    if claim_url and claim_url.startswith("http"):
+                        await self._long_term_memory.graph.store_document(
+                            url=claim_url, session_id=session_id
+                        )
+
+            if stored_entities or stored_rels or stored_claims:
                 self._graph_mutations_since_community_update += (
-                    stored_entities + stored_rels
+                    stored_entities + stored_rels + stored_claims
                 )
                 logger.debug(
                     "[Orchestrator] Graph extraction for step %d: "
-                    "%d entities, %d relationships.",
+                    "%d entities, %d relationships, %d claims.",
                     step.id,
                     stored_entities,
                     stored_rels,
+                    stored_claims,
                 )
 
         except json.JSONDecodeError as exc:

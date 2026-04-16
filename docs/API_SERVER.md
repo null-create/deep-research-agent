@@ -20,6 +20,7 @@
    - [GET /config](#get-config)
    - [POST /config](#post-config)
    - [POST /chat](#post-chat)
+   - [Knowledge Graph Endpoints](#knowledge-graph-endpoints)
 6. [WebSocket Endpoint](#websocket-endpoint)
    - [/ws/research (Orchestrator)](#wsresearch-orchestrator)
 7. [Shared Message Contract](#shared-message-contract)
@@ -265,6 +266,112 @@ The latest advancements in renewable energy include...
 ```
 
 **503** — agent not initialised.
+
+---
+
+### Knowledge Graph Endpoints
+
+All graph endpoints query the `KnowledgeGraph` layer of `AsyncLongTermMemory`. They return `{"message": "LongTermMemory not available"}` if Neo4j is not connected.
+
+#### GET `/graph/stats`
+
+Returns entity, relationship, community, contradiction, document, claim, and hierarchy counts.
+
+#### GET `/graph/entities`
+
+Semantic entity search across all typed node labels.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `query` | `string` | `""` | Semantic search query. If empty, returns most recent entities. |
+| `limit` | `int` | `10` | Max results (1–100) |
+| `include_hierarchy` | `bool` | `false` | Include IS_A ancestor names |
+| `node_type` | `string` | `""` | Filter by entity type (comma-separated: `person,technology`) |
+
+#### GET `/graph/relationships`
+
+Traverse typed relationships (CAUSES, ENABLES, USES, etc.) from a named entity.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `entity` | `string` | `""` | Seed entity name |
+| `max_hops` | `int` | `2` | Traversal depth (1–4) |
+| `min_confidence` | `float` | `0.0` | Post-filter by confidence |
+
+#### GET `/graph/communities`
+
+List all community cluster summaries.
+
+#### GET `/graph/contradictions`
+
+Return CONTRADICTS edges, optionally filtered to a named entity.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `entity` | `string` | `""` | Filter by entity name |
+| `limit` | `int` | `20` | Max results (1–100) |
+
+#### GET `/graph/provenance`
+
+Return Document nodes linked to entities via SOURCED_FROM edges.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `entity` | `string` | `""` | Filter by entity name |
+
+#### GET `/graph/paths`
+
+Find shortest paths between two named entities.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `source` | `string` | *(required)* | Source entity name |
+| `target` | `string` | *(required)* | Target entity name |
+| `max_depth` | `int` | `4` | Max path length |
+
+#### GET `/graph/session/{session_id}`
+
+Return entities and relationships created during a specific research session.
+
+#### GET `/graph/claims`
+
+Search claims by semantic query, entity, or status.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `query` | `string` | `""` | Semantic search query |
+| `entity` | `string` | `""` | Filter by linked entity name |
+| `status` | `string` | `""` | Filter by claim status (`supported`, `disputed`, `unverified`, `retracted`) |
+| `limit` | `int` | `20` | Max results (1–100) |
+
+#### PATCH `/graph/claims/{claim_id}`
+
+Update a claim's status.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `status` | `string` | *(required)* | New status value |
+
+#### GET `/graph/documents`
+
+Search documents by semantic query, optionally filtered.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `query` | `string` | `""` | Semantic search query |
+| `doc_type` | `string` | `""` | Filter by document type |
+| `min_credibility` | `float` | `0.0` | Minimum credibility score |
+| `limit` | `int` | `20` | Max results (1–100) |
+
+#### POST `/graph/prune`
+
+Prune stale graph elements. Runs in dry-run mode by default.
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `min_confidence` | `float` | `0.1` | Remove edges below this confidence |
+| `max_age_days` | `int` | `180` | Remove edges not confirmed in this many days |
+| `dry_run` | `bool` | `true` | When true, only count — do not delete |
 
 ---
 

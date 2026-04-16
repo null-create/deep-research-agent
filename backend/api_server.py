@@ -838,14 +838,25 @@ async def graph_entities(
     query: str = "",
     limit: int = 10,
     include_hierarchy: bool = False,
+    node_type: str = "",
 ):
-    """Semantic entity search.  Returns up to *limit* entities closest to *query*."""
+    """Semantic entity search.  Returns up to *limit* entities closest to *query*.
+
+    Optionally filter by *node_type* (person, organization, technology, concept,
+    event, location, metric).  Comma-separated values accepted.
+    """
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     ltm = _get_ltm(request)
+    node_types = (
+        [t.strip() for t in node_type.split(",") if t.strip()] if node_type else None
+    )
     if query:
         entities = await ltm.graph.find_entities(
-            query, limit=limit, include_hierarchy=include_hierarchy
+            query,
+            limit=limit,
+            include_hierarchy=include_hierarchy,
+            node_types=node_types,
         )
     else:
         entities = await ltm.graph.recent_entities(limit=limit)
@@ -969,13 +980,75 @@ async def graph_prune(
         "message": (
             f"Would delete: {result['relationships']} relationships, "
             f"{result['entities']} orphaned entities, "
-            f"{result['contradictions']} dangling contradictions."
+            f"{result['contradictions']} dangling contradictions, "
+            f"{result['claims']} orphaned claims."
             if dry_run
             else f"Deleted: {result['relationships']} relationships, "
             f"{result['entities']} orphaned entities, "
-            f"{result['contradictions']} dangling contradictions."
+            f"{result['contradictions']} dangling contradictions, "
+            f"{result['claims']} orphaned claims."
         ),
     }
+
+
+@app.get("/graph/claims")
+async def graph_claims(
+    request: Request,
+    query: str = "",
+    entity: str = "",
+    status: str = "",
+    limit: int = 20,
+):
+    """Search claims by semantic query, entity name, or status."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be 1-100")
+    ltm = _get_ltm(request)
+    claims = await ltm.graph.find_claims(
+        query=query,
+        limit=limit,
+        entity_name=entity or None,
+        status=status or None,
+    )
+    return {"claims": claims}
+
+
+@app.patch("/graph/claims/{claim_id}")
+async def graph_update_claim(
+    request: Request,
+    claim_id: str,
+    status: str = "",
+):
+    """Update a claim's status (supported, disputed, unverified, retracted)."""
+    if not status:
+        raise HTTPException(status_code=422, detail="'status' query parameter required")
+    ltm = _get_ltm(request)
+    result = await ltm.graph.update_claim_status(claim_id, status)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=404, detail=result.get("message", "Claim not found")
+        )
+    return {"success": True, "claim_id": claim_id, "status": status}
+
+
+@app.get("/graph/documents")
+async def graph_documents(
+    request: Request,
+    query: str = "",
+    doc_type: str = "",
+    min_credibility: float = 0.0,
+    limit: int = 20,
+):
+    """Search documents by semantic query, optionally filtered by type or credibility."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be 1-100")
+    ltm = _get_ltm(request)
+    documents = await ltm.graph.find_documents(
+        query=query,
+        limit=limit,
+        doc_type=doc_type or None,
+        min_credibility=min_credibility if min_credibility > 0.0 else None,
+    )
+    return {"documents": documents}
 
 
 # ── Chat endpoint ──────────────────────────────────────────────────────────────

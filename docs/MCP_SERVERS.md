@@ -3,7 +3,7 @@
 > **Directory:** `mcp/`  
 > **Protocol:** [Model Context Protocol](https://modelcontextprotocol.io/) via [FastMCP](https://github.com/jlowin/fastmcp)  
 > **Transport:** `streamable-http` (HTTP/SSE)  
-> **Compose file:** `docker-compose-mcp.yml`
+> **Compose file:** `docker-compose.yml`
 
 ---
 
@@ -15,17 +15,17 @@
    - [Health Checks](#health-checks)
    - [Docker Conventions](#docker-conventions)
    - [Network](#network)
-3. [Memory Server](#memory-server)
-   - [Purpose](#purpose-1)
+3. [Long-Term Memory](#long-term-memory-in-process-neo4j-backed)
    - [Storage Architecture](#storage-architecture)
-   - [Tools](#tools-memory)
+   - [Python API](#python-api)
+   - [Knowledge Graph API](#knowledge-graph-api)
    - [Memory Record Shape](#memory-record-shape)
-   - [Relation Graph](#relation-graph)
+   - [Relationship Graph](#relationship-graph)
    - [Memory Scoring & Ranking](#memory-scoring--ranking)
    - [Memory Decay](#memory-decay)
    - [Deduplication](#deduplication)
    - [Persistence](#persistence)
-   - [Configuration](#configuration-memory)
+   - [Configuration](#configuration-long-term-memory)
 4. [Web Search Server](#web-search-server)
    - [Purpose](#purpose-2)
    - [Search Backends](#search-backends)
@@ -41,8 +41,8 @@
    - [Purpose](#purpose-4)
    - [Tool Modules](#tool-modules)
    - [Tools](#tools-file-handler)
+   - [HTTP REST Endpoints](#http-rest-endpoints)
    - [Atomic Writes](#atomic-writes)
-   - [Embedding Support](#embedding-support)
    - [Persistence](#persistence-1)
    - [Configuration](#configuration-file-handler)
 7. [Server Summary](#server-summary)
@@ -54,7 +54,7 @@
 
 ## Overview
 
-The research assistant uses four independent MCP servers, each running in its own Docker container and communicating with the backend over a shared Docker network. Each server exposes a set of **tools** — callable functions that the agent's LLM can invoke during the tool-calling loop in `_execute_step`.
+The research assistant uses three independent MCP servers, each running in its own Docker container and communicating with the backend over a shared Docker network. Each server exposes a set of **tools** — callable functions that the agent's LLM can invoke during the tool-calling loop in `_execute_step`. Long-term memory is handled in-process via a direct Neo4j connection and is not an MCP server.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -76,7 +76,7 @@ The research assistant uses four independent MCP servers, each running in its ow
     └──────────┘  └─────────────┘  └──────────┘  └──────┬───────┘
                                                          │
                                                     /app/data
-                                               ./file_handler_data
+                                                       ./data
 ```
 
 The backend connects to all three MCP servers at startup via `create_mcp_registry()`. If a server is unreachable, the registry logs a warning and continues without it — research sessions will proceed with degraded capability rather than failing entirely. Long-term memory connects directly to Neo4j via the `neo4j` async driver (not an MCP server).
@@ -107,7 +107,7 @@ This is used by Docker for container health monitoring.
 
 ### Docker Conventions
 
-All four servers share the same Dockerfile pattern:
+All three MCP servers share the same Dockerfile pattern:
 
 | Convention | Value |
 |---|---|
@@ -129,7 +129,7 @@ Environment variables available in all containers:
 
 ### Network
 
-All services — including the backend — are attached to the `research-network` bridge network defined in `docker-compose-mcp.yml`. Containers address each other by Docker service name (e.g. `mcp-memory-server`).
+All services — including the backend — are attached to the `research-network` bridge network defined in `docker-compose.yml`. Containers address each other by Docker service name (e.g. `mcp-web-search-server`).
 
 ---
 
@@ -152,23 +152,28 @@ AsyncLongTermMemory  (backend/long_term_memory.py)
        │     Similarity: cosine via Neo4j vector index
        │
        ├── :Entity nodes + entity_embedding_idx
-       │     Stores: named entities with type, descriptions
-       │
-       ├── :RELATES_TO edges
-       │     Stores: directed triples between entities
+       │     Stores: named entities with type, descriptions, confidence score
        │
        ├── :Community nodes + community_embedding_idx
        │     Stores: LLM-generated cluster summaries
        │
-       └── :MEMBER_OF edges
-             Links: entities → communities
+       ├── :Source nodes
+       │     Stores: web source URL, title, credibility score
+       │
+       ├── :RELATES_TO edges  — directed factual relationships between entities
+       ├── :IS_A edges        — hierarchical taxonomy (child → parent)
+       ├── :CONTRADICTS edges — flags two relationships as conflicting claims
+       ├── :SOURCED_FROM edges — entity/memory → source URL node
+       └── :MEMBER_OF edges   — entities → community clusters
 ```
 
 Embeddings are generated using the `all-MiniLM-L6-v2` sentence transformer model (loaded at backend startup via `warm_up_embeddings()`). All embedding calls are offloaded to a `ThreadPoolExecutor`.
 
-### Tools (Memory)
+### Python API
 
-#### `store_memory`
+The `AsyncLongTermMemory` module is called directly from the backend (not via MCP). Its three primary methods are:
+
+#### `store(content, category, importance, tags, extra_metadata)`
 
 Stores a new memory with automatic embedding generation and near-duplicate detection.
 
@@ -178,7 +183,7 @@ Stores a new memory with automatic embedding generation and near-duplicate detec
 | `category` | `str` | `"general"` | Logical grouping label |
 | `importance` | `int` | `5` | Priority weight 1–10; higher = retrieved first |
 | `tags` | `List[str]` | `[]` | Free-form labels for filtering |
-| `metadata` | `Dict` | `{}` | Arbitrary key-value pairs (stored with `custom_` prefix) |
+| `extra_metadata` | `Dict` | `{}` | Arbitrary key-value pairs (stored with `custom_` prefix) |
 
 **Returns:**
 
@@ -186,15 +191,15 @@ Stores a new memory with automatic embedding generation and near-duplicate detec
 {
   "success": true,
   "memory_id": "<uuid>",
-  "message": "Memory stored successfully"
+  "message": "Stored"
 }
 ```
 
-If a memory with > 0.95 cosine similarity already exists, the call is rejected and the existing `memory_id` is returned instead, preventing duplicate accumulation.
+If a memory with cosine similarity ≥ 0.95 already exists, the call returns `success: false` and the existing `memory_id` to prevent duplicate accumulation.
 
 ---
 
-#### `recall_memories`
+#### `recall(query, category, min_importance, limit, similarity_threshold)`
 
 Retrieves memories using **semantic vector search** plus optional metadata filters.
 
@@ -202,30 +207,19 @@ Retrieves memories using **semantic vector search** plus optional metadata filte
 |---|---|---|---|
 | `query` | `str` | `None` | Semantic search query — finds by *meaning*, not keywords |
 | `category` | `str` | `None` | Filter to a specific category |
-| `tags` | `List[str]` | `None` | Return memories with any of these tags |
 | `min_importance` | `int` | `None` | Only return memories at or above this importance level |
 | `limit` | `int` | `10` | Maximum number of memories to return |
 | `similarity_threshold` | `float` | `0.0` | Minimum cosine similarity to include (0.0–1.0) |
 
-If `query` is `None`, returns all memories matching the metadata filters sorted by importance. Otherwise, performs a vector search and sorts results by `importance × similarity`.
+If `query` is `None`, returns memories matching the metadata filters sorted by importance. Otherwise, performs a vector search and ranks results by `importance × similarity`.
 
-Each call increments the `access_count` and updates `last_accessed` on every returned memory.
-
-**Returns:** JSON array of [Memory Record](#memory-record-shape) objects.
+**Returns:** List of [Memory Record](#memory-record-shape) dicts.
 
 ---
 
-#### `retrieve_all_memories`
+#### `find_similar(query, limit, min_similarity)`
 
-Returns every stored memory with no filtering. Intended for the `SelfOptimizingAgent`'s introspection cycle. Use with caution on large memory stores.
-
-**Returns:** JSON array of all [Memory Record](#memory-record-shape) objects.
-
----
-
-#### `find_similar_memories`
-
-Convenience wrapper around `recall_memories` with a stricter default similarity threshold. Useful for associative recall — finding memories that are *semantically close* to a given concept.
+Convenience wrapper around `recall()` with a stricter default similarity threshold. Useful for associative recall — finding memories that are *semantically close* to a given concept.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -233,99 +227,32 @@ Convenience wrapper around `recall_memories` with a stricter default similarity 
 | `limit` | `int` | `5` | Maximum results |
 | `min_similarity` | `float` | `0.7` | Minimum cosine similarity threshold |
 
-**Returns:** JSON array of [Memory Record](#memory-record-shape) objects.
+**Returns:** List of [Memory Record](#memory-record-shape) dicts.
 
 ---
 
-#### `update_memory`
+### Knowledge Graph API
 
-Updates an existing memory by ID. Updating `content` deletes and re-inserts the record to regenerate its embedding. Updating only metadata fields is done in-place without touching the embedding.
+A richer set of graph-oriented methods is available via the `.graph` attribute (`AsyncLongTermMemory.graph`). The graph stores extracted named entities, their relationships, sourced URLs, and community clusters.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `memory_id` | `str` | *required* | UUID of the memory to update |
-| `content` | `str` | `None` | New content (triggers embedding regeneration) |
-| `category` | `str` | `None` | New category |
-| `importance` | `int` | `None` | New importance level |
-| `tags` | `List[str]` | `None` | Replacement tag list |
-| `metadata` | `Dict` | `None` | Metadata to merge into existing custom fields |
-
----
-
-#### `delete_memory`
-
-Deletes a memory and all relations that reference it (both incoming and outgoing edges in the relation graph).
-
-| Parameter | Type | Description |
-|---|---|---|
-| `memory_id` | `str` | UUID of the memory to delete |
-
----
-
-#### `create_relation`
-
-Creates a directed, typed edge between two memories in the relation graph.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `from_memory_id` | `str` | *required* | Source memory UUID |
-| `to_memory_id` | `str` | *required* | Target memory UUID |
-| `relation_type` | `str` | `"related_to"` | Semantic label for the edge (e.g. `"causes"`, `"part_of"`, `"contradicts"`) |
-| `strength` | `float` | `1.0` | Edge weight 0.0–1.0 |
-
-Relations are themselves stored as embeddings in the `agent_memories_relations` collection, meaning they can also be searched semantically in future extensions.
-
----
-
-#### `get_related_memories`
-
-Traverses the relation graph outward from a given memory and returns all directly connected memories.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `memory_id` | `str` | *required* | UUID to find relations for |
-| `relation_type` | `str` | `None` | Filter to a specific relation type |
-| `min_strength` | `float` | `0.0` | Minimum edge weight |
-
-Each result includes `relation_type`, `relation_strength`, and `relation_direction` (`"incoming"` or `"outgoing"`).
-
----
-
-#### `get_statistics`
-
-Returns aggregate metrics about the memory store.
-
-**Returns:**
-
-```json
-{
-  "total_memories": 142,
-  "memories_by_category": { "research_session": 38, "insight": 104 },
-  "top_tags": { "climate": 12, "energy": 9 },
-  "average_importance": 5.4,
-  "most_accessed_memories": [
-    { "id": "...", "content": "...", "access_count": 27 }
-  ],
-  "total_relations": 18
-}
-```
-
----
-
-#### `consolidate_memories`
-
-Simulates memory decay by decreasing the `importance` of old, rarely-accessed memories by 1 (minimum 1). Only memories that are:
-
-- `importance >= min_importance` (default 3)
-- Last accessed more than `days_old` days ago (default 30)
-- `access_count < 5`
-
-…are affected. Memories that are frequently accessed or very recent are left untouched.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `min_importance` | `int` | `3` | Only consolidate memories at or above this importance |
-| `days_old` | `int` | `30` | Only consolidate memories not accessed within this window |
+| Method | Description |
+|---|---|
+| `graph.upsert_entity(name, entity_type, description, session_id)` | Create or update a named entity node |
+| `graph.store_relationship(source, target, relation, evidence, ...)` | Create a typed `RELATES_TO` edge between two entities |
+| `graph.store_hierarchy(child_name, parent_name)` | Create an `IS_A` edge (taxonomic relationship) |
+| `graph.store_contradiction(rel_id_a, rel_id_b, explanation, session_id)` | Flag two relationships as contradicting each other |
+| `graph.store_source(url, title, credibility_score)` | Persist a web source node |
+| `graph.link_to_source(entity_name, source_url)` | Attach a `SOURCED_FROM` edge to an entity |
+| `graph.find_entities(query, limit, include_hierarchy)` | Semantic search over entity nodes |
+| `graph.find_contradictions(entity_names, limit)` | Find contradiction edges involving named entities |
+| `graph.get_relationships(entity_ids, max_hops)` | Traverse the graph outward from given entity IDs |
+| `graph.get_communities(entity_ids)` | Return community clusters containing these entities |
+| `graph.get_provenance(entity_names)` | Find source nodes linked to given entities |
+| `graph.recall_graph_context(query, entity_limit, max_hops, ...)` | Combine entity search + graph traversal into a formatted context string |
+| `graph.decay_confidence(half_life_days)` | Apply exponential decay to `RELATES_TO` edge confidence scores |
+| `graph.prune(min_confidence, max_age_days, dry_run)` | Remove low-confidence, stale graph edges |
+| `graph.update_communities(summarize_fn)` | Re-cluster entities and regenerate LLM community summaries |
+| `graph.stats()` | Return aggregate counts of all node and edge types |
 
 ---
 
@@ -354,29 +281,23 @@ Every tool that returns memories uses this structure:
 
 ### Relationship Graph
 
-The relationship graph is stored as native Neo4j `:RELATES_TO` edges between `:Entity` nodes. Edges have:
+The knowledge graph stores typed, directed edges as native Neo4j relationships:
 
-- `from_memory_id` / `to_memory_id` — the two connected memories
-- `relation_type` — a free-form semantic label
-- `strength` — a float weight (0.0–1.0)
-- `created_at` — timestamp
+| Type | Direction | Meaning |
+|---|---|---|
+| `RELATES_TO` | Entity → Entity | Directed factual relationship; carries `relation_type`, `evidence`, `confidence`, and `session_id` properties |
+| `IS_A` | Entity → Entity | Hierarchical taxonomy — child is a type of parent |
+| `CONTRADICTS` | Relationship → Relationship | Flags two `RELATES_TO` edges as containing conflicting claims |
+| `SOURCED_FROM` | Entity/Memory → Source | Provenance link to the web source the fact was found in |
+| `MEMBER_OF` | Entity → Community | Entity belongs to a cluster community |
 
-Built-in suggested relation types (not enforced):
-
-| Type | Meaning |
-|---|---|
-| `related_to` | Generic association |
-| `causes` | Causal link |
-| `part_of` | Hierarchical containment |
-| `contradicts` | Factual conflict |
-| `supports` | Corroborating evidence |
-| `derived_from` | One memory was derived from another |
+Confidence on `RELATES_TO` edges decays over time via `graph.decay_confidence()` and stale edges can be removed with `graph.prune()`.
 
 ---
 
 ### Memory Scoring & Ranking
 
-`recall_memories` ranks results by `importance × similarity`:
+`recall()` ranks results by `importance × similarity`:
 
 - A memory with `importance=10` and `similarity=0.5` scores `5.0`.
 - A memory with `importance=5` and `similarity=0.95` scores `4.75`.
@@ -387,23 +308,17 @@ This means highly important memories can outrank slightly more semantically simi
 
 ### Memory Decay
 
-`consolidate_memories` is designed to be called periodically (e.g. on a cron schedule or by the `SelfOptimizingAgent`). It implements a simple importance decay model:
+Knowledge graph edge confidence decays over time via two methods intended to be called periodically (e.g. by the `SelfOptimizingAgent`'s introspection cycle):
 
-```
-For each memory:
-  if importance >= min_importance
-  AND last_accessed < (now - days_old)
-  AND access_count < 5:
-      importance = max(1, importance - 1)
-```
+- **`graph.decay_confidence(half_life_days)`** — Applies exponential decay to all `:RELATES_TO` edge confidence scores. Edges are not deleted; low-confidence edges are removed separately by `prune()`.
 
-Memories that are accessed regularly will have their `access_count` incremented by `recall_memories` and will never be decayed.
+- **`graph.prune(min_confidence, max_age_days, dry_run=False)`** — Removes `:RELATES_TO` edges whose confidence has fallen below `min_confidence` and which are older than `max_age_days`. Set `dry_run=True` to preview what would be removed without committing changes.
 
 ---
 
 ### Deduplication
 
-Before adding a new memory, `store()` uses the Neo4j vector index to find the most similar existing `:Memory` node. If its cosine similarity exceeds `0.95`, the new memory is rejected and the existing ID is returned. This prevents the store from accumulating near-identical records from repeated research sessions on the same topic.
+Before storing a new memory, `store()` queries the `memory_embedding_idx` vector index for the nearest existing `:Memory` node. If its cosine similarity meets or exceeds `0.95`, the new memory is rejected and the existing `memory_id` is returned. This prevents accumulation of near-identical records from repeated research sessions on the same topic.
 
 ---
 
@@ -509,17 +424,6 @@ Searches GitHub public repositories by name, description, and topic using the Gi
 |---|---|---|---|
 | `query` | `str` | *required* | Search query |
 | `max_results` | `int` | `10` | Number of repositories (clamped 1–50) |
-
----
-
-#### `get_search_suggestions`
-
-Returns DuckDuckGo autocomplete suggestions for a partial query. Useful for query expansion or disambiguation before a full search.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `query` | `str` | *required* | Partial query to get suggestions for |
-| `region` | `str` | `"wt-wt"` | Region code |
 
 ---
 
@@ -656,26 +560,44 @@ Fetches full web page content given a URL and returns clean, structured text. Wh
 URL input
     │
     ▼
+URL validation (scheme + netloc required)
+    │
+    ▼
 asyncio.Semaphore(3)              ← at most 3 concurrent fetches
     │
     ▼
 _enforce_domain_rate(domain)      ← 2s minimum interval per domain
     │
     ▼
-httpx.AsyncClient.get(url)        ← 30s timeout, follows redirects,
+httpx.AsyncClient.get(url)        ← configurable timeout (default 10s),
+    │                                follows redirects,
     │                                rotated User-Agent from pool of 6
     │                                (Chrome 123/124, Firefox 125, Safari 17)
     │                                retry once on HTTP 429 with Retry-After
     ▼
+Content-Type check                ← reject PDFs, images, and other binary types early
+    │
+    ▼
+Binary content guard              ← detect null bytes in first 8 KB;
+    │                                catches mislabeled binary responses
+    ▼
 BeautifulSoup HTML parse
     │
-    ├── Remove <script> and <style> tags
+    ├── _extract_metadata()        ← title, author, description, published date
+    │     from <title>, <meta name/property> tags
     │
-    ├── Extract text via soup.get_text()
+    ├── _remove_boilerplate()      ← decompose <script>, <style>, <nav>,
+    │     <footer>, <header>, <aside>, and elements matching cookie/consent/
+    │     sidebar/ad/newsletter/promo/pagination patterns
     │
-    ├── (if clean_text=True) Strip blank lines and double-spaces
+    ├── _extract_main_content()    ← 3-stage heuristic:
+    │     1. Semantic elements: <article>, <main>, role=main, content/post id
+    │     2. Positive class/id patterns: content, article, post, entry, story
+    │     3. Highest-scoring block by text volume × paragraph count ÷ link density
     │
-    ├── Truncate text to 50 KB (_SCRAPE_MAX_CHARS) to prevent log bloat;
+    ├── (if clean_text=True) Collapse whitespace and blank lines
+    │
+    ├── Truncate to _SCRAPE_MAX_CHARS (default 100 000);
     │     appends "[... truncated — original N chars]" marker if cut
     │
     ├── (if include_links=True) Extract all <a href> tags,
@@ -685,7 +607,7 @@ BeautifulSoup HTML parse
           convert relative URLs to absolute
 ```
 
-The `httpx` client is a **module-level singleton** with `follow_redirects=True`. A User-Agent is selected randomly from a pool of six modern browser strings (Chrome 123/124, Firefox 125, Safari 17) on every request to reduce bot-detection fingerprinting. Concurrent requests are capped at 3 via an `asyncio.Semaphore`, and a 2-second minimum interval is enforced per domain to prevent rate-limiting. HTTP 429 responses are retried once after the server's `Retry-After` delay (capped at 10 s).
+The `httpx` client is a **module-level singleton** with `follow_redirects=True`. A User-Agent is selected randomly from a pool of six modern browser strings on every request. Concurrent requests are capped at 3 via an `asyncio.Semaphore`, and a 2-second minimum interval is enforced per domain. HTTP 429 responses are retried once after the server's `Retry-After` delay (capped at 10 s). Non-text `Content-Type` headers (PDFs, images, binary files) are rejected before parsing, and a null-byte scan catches mislabeled binary responses.
 
 ### Tools (Web Scraper)
 
@@ -704,11 +626,13 @@ Fetches and extracts the complete content of a web page.
 
 ```
 URL: https://example.com/article
-Status Code: 200
-Content Type: text/html; charset=utf-8
+Title: Article Title                  (if found in <title>)
+Author: Jane Smith                    (if found in <meta name="author">)
+Published: 2024-06-18T10:00:00Z       (if found in article:published_time meta)
+Description: Short page description   (if found in <meta name="description">)
 
 --- PAGE CONTENT ---
-<extracted text body>
+<extracted text body — boilerplate stripped, main content focused>
 
 --- LINKS ---          (if include_links=True)
 Link text: https://example.com/other-page
@@ -719,7 +643,7 @@ Alt text: https://example.com/image.jpg
 ...
 ```
 
-On error, raises a `ValueError` with a descriptive message (HTTP status error, request error, or invalid URL). HTTP 403 errors are not retried — they indicate access denial and a retry would consume quota without improving the outcome.
+Non-text content types (PDFs, images, binary files) return a `[SKIPPED]` message instead of raising. HTTP status errors and request errors raise a `ValueError` with a descriptive message.
 
 ### Configuration (Web Scraper)
 
@@ -727,15 +651,15 @@ On error, raises a `ValueError` with a descriptive message (HTTP status error, r
 |---|---|---|
 | `HOST_PORT` | `9292` | Server bind port |
 | `HOST_ADDR` | `0.0.0.0` | Server bind address |
+| `SCRAPE_MAX_CHARS` | `100000` | Maximum extracted text characters returned; excess is truncated |
+| `SCRAPE_TIMEOUT` | `10` | Per-request HTTP timeout in seconds |
 
-The following constants are hardcoded in `main.py` and can be changed by editing the file:
+The following constants are hardcoded in `main.py`:
 
 | Constant | Value | Description |
 |---|---|---|
-| `_SCRAPE_MAX_CHARS` | `50 000` | Maximum extracted text characters returned; excess is truncated |
 | `_DOMAIN_MIN_INTERVAL` | `2.0 s` | Minimum delay between successive requests to the same domain |
 | Semaphore | `3` | Maximum simultaneous in-flight scrape requests |
-| Client timeout | `30 s` | Per-request HTTP timeout |
 
 Pages requiring JavaScript rendering (SPAs) will return minimal or empty content since no headless browser is used. For JS-heavy sites, consider adding a Playwright or Puppeteer-based tool to this server.
 
@@ -749,9 +673,9 @@ Pages requiring JavaScript rendering (SPAs) will return minimal or empty content
 
 ### Purpose
 
-Provides **sandboxed file I/O** for the research agent. All reads and writes are scoped to `/app/data` inside the container, which is bind-mounted to `./file_handler_data` on the host. This isolates arbitrary file writes from the host filesystem while still making outputs accessible.
+Provides **sandboxed file I/O** for the research agent. All reads and writes are scoped to `/app/data/documents` inside the container, which is bind-mounted via the `./data` host volume. This isolates arbitrary file writes from the host filesystem while still making outputs accessible.
 
-The server also provides **text embedding tools** powered by `sentence-transformers`, enabling semantic similarity search over file contents.
+The server also exposes HTTP REST endpoints for direct browser-based file management (upload, list, delete).
 
 ### Tool Modules
 
@@ -762,7 +686,7 @@ The implementation is split across four Python modules under `mcp/file_handler/t
 | `file_reader.py` | Simple and streaming file reads, document text extraction (PDF, DOCX, ODT), directory listing |
 | `file_writer.py` | Chunked atomic writes and append operations |
 | `file_transfer.py` | HTTP upload and download |
-| `file_embeddings.py` | Embedding generation and similarity search |
+| `file_discovery.py` | Allowlisted shell command execution for file discovery and system inspection |
 
 ### Tools (File Handler)
 
@@ -776,7 +700,7 @@ Recursively walks the output directory (`/app/data`) and returns a flat list of 
 [
   {
     "name": "research_report_abc123.txt",
-    "absolute_path": "/app/data/research_report_abc123.txt",
+    "absolute_path": "/app/data/documents/research_report_abc123.txt",
     "relative_path": "research_report_abc123.txt",
     "size_bytes": 14823
   }
@@ -810,14 +734,12 @@ For binary document formats, the file is automatically converted to plain text b
 
 Streams a file in chunks to avoid loading the entire content into memory. Intended for large files. Supports the same document formats as `read_file` — binary documents (PDF, DOCX, ODT) are extracted to plain text first and then streamed from an in-memory buffer.
 
-The `invocation` dict accepts:
-
-| Key | Type | Default | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | `str` | *required* | Path to the file |
+| `file_path` | `str` | *required* | Path to the file |
 | `chunk_size` | `int` | `8192` | Bytes per chunk (512 B – 1 MB) |
 | `encoding` | `str` | `utf-8` | File encoding (ignored for binary document formats) |
-| `max_file_size` | `int` | `100 MB` | Maximum allowable file size |
+| `max_file_size` | `int` | `10 MB` | Maximum allowable file size |
 
 **Yields:** `FileChunk` dicts: `{ "chunk": "...", "index": N, "eof": bool, "chunk_size": N }`.
 
@@ -827,16 +749,14 @@ The `invocation` dict accepts:
 
 Writes content to a file inside the output directory. Uses **atomic writes** for `write` and `create` modes (see [Atomic Writes](#atomic-writes)). Returns a `/files/<filename>` URL for the written file.
 
-The `invocation` dict accepts:
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `file_name` | `str` | *required* | Filename (not a full path) — file is created under `/app/data/` |
-| `content` | `str` | *required* | Text content to write |
-| `encoding` | `str` | `utf-8` | File encoding |
-| `mode` | `str` | `write` | `write` (overwrite), `append`, or `create` (fail if exists) |
-| `max_file_size` | `int` | `10 MB` | Maximum allowed file size in bytes |
-| `chunk_size` | `int` | `8192` | Internal chunk size for streaming writes |
+| Parameter | Type | Description |
+|---|---|---|
+| `file_name` | `str` | Filename (not a full path) — file is created under `/app/data/documents/` |
+| `content` | `str` | Text content to write |
+| `encoding` | `str` | File encoding (e.g. `utf-8`) |
+| `mode` | `str` | `write` (overwrite), `append`, or `create` (fail if exists) |
+| `max_file_size` | `int` | Maximum allowed file size in bytes |
+| `chunk_size` | `int` | Internal chunk size for streaming writes |
 
 **Returns:**
 
@@ -850,9 +770,7 @@ The `invocation` dict accepts:
 
 Uploads a file from the output directory to an external URL via HTTP POST (multipart/form-data).
 
-The `invocation` dict accepts:
-
-| Key | Type | Description |
+| Parameter | Type | Description |
 |---|---|---|
 | `file_path` | `str` | Path to the file inside the output directory |
 | `upload_url` | `str` | Destination URL to POST the file to |
@@ -863,9 +781,7 @@ The `invocation` dict accepts:
 
 Downloads a file from an external URL and saves it into the output directory. Uses streaming download to handle large files without excessive memory usage.
 
-The `invocation` dict accepts:
-
-| Key | Type | Default | Description |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
 | `file_url` | `str` | *required* | URL to download from |
 | `headers` | `Dict` | `{}` | Optional HTTP headers (e.g. `Authorization`) |
@@ -874,53 +790,40 @@ The `invocation` dict accepts:
 
 ---
 
-#### `create_file_embedding`
+#### `run_command`
 
-Reads a file and generates a semantic embedding vector for its content using `sentence-transformers`.
+Executes a read-only shell command inside the container and returns its output. The command's base token is checked against an allowlist before any subprocess is spawned — commands not in the list are rejected with an error message listing permitted commands.
 
-The `invocation` dict accepts:
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `command` | `str` | *required* | The full shell command string to execute |
+| `timeout` | `int` | `30` | Maximum seconds to wait before killing the process |
 
-| Key | Type | Description |
-|---|---|---|
-| `file_path` | `str` | Path to the file |
+**Allowed base commands:** `ls`, `cat`, `head`, `tail`, `pwd`, `find`, `du`, `df`, `stat`, `file`, `wc`, `grep`, `awk`, `sed`, `sort`, `uniq`, `cut`, `tr`, `diff`, `echo`, `date`, `uptime`, `whoami`, `uname`, `ps`, `env`, `which`, `lsof`, `git`
 
-**Returns:** `EmbeddingOutput` dict:
+**Returns:**
 
 ```json
 {
-  "embeddings": [[0.021, -0.143, ...]],
-  "dimensions": 384,
-  "count": 1,
-  "model_name": "all-MiniLM-L6-v2"
+  "stdout": "file1.txt\nfile2.md\n",
+  "stderr": "",
+  "returncode": 0
 }
 ```
 
 ---
 
-#### `find_similar_texts_in_file_embeddings`
+### HTTP REST Endpoints
 
-Loads a precomputed embeddings file (produced by `save_embeddings` from `file_embeddings.py`) and returns the top-K most similar texts to an input query.
+In addition to MCP tools, the server exposes three HTTP endpoints for direct browser-based file management:
 
-The `invocation` dict accepts:
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/files` | Returns a JSON array of all files in the output directory |
+| `POST` | `/files/upload` | Accepts a `multipart/form-data` upload and saves the file to the output directory |
+| `DELETE` | `/files/{filename}` | Deletes a previously uploaded file from the output directory |
 
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `input_text` | `str` | *required* | Query text |
-| `embeddings_file_path` | `str` | *required* | Path to a JSON embeddings file |
-| `top_k` | `int` | `5` | Number of top results to return |
-| `model_name` | `str` | `all-MiniLM-L6-v2` | Sentence transformer model to use |
-
-**Returns:** `SimilaritySearchOutput` dict:
-
-```json
-{
-  "results": [
-    { "text": "...", "similarity_score": 0.912, "index": 3 }
-  ],
-  "query_text": "...",
-  "model_name": "all-MiniLM-L6-v2"
-}
-```
+Filenames are sanitised with `os.path.basename()` on all write and delete operations to prevent path traversal.
 
 ---
 
@@ -936,22 +839,16 @@ For `write` and `create` modes, `write_file` uses a write-then-rename strategy t
 
 If the write fails at any point, the temp file is cleaned up and the original target file is left untouched. `append` mode writes directly to the target file since atomicity is not meaningful for appends.
 
-### Embedding Support
-
-`file_embeddings.py` wraps `sentence-transformers` with a clean Pydantic-validated API. Models are cached in a module-level `_model_cache` dict after first load so repeated calls within the same container lifetime don't reload the model from disk.
-
-The default model is `all-MiniLM-L6-v2` — a lightweight 384-dimension model that balances speed and quality for document similarity tasks. This is the **same model** used by the Memory server, so embeddings produced by both servers are comparable in the same vector space.
-
 ### Persistence
 
-Files written via `write_file` are stored in `/app/data` inside the container, which is bind-mounted to `./file_handler_data` on the host:
+Files written via `write_file` are stored in `/app/data/documents` inside the container. The host volume mount is:
 
 ```yaml
 volumes:
-  - ./file_handler_data:/app/data
+  - ./data:/app/data
 ```
 
-Files survive container restarts. To clear all outputs, delete `./file_handler_data` on the host.
+Files survive container restarts. To clear all outputs, delete `./data/documents` on the host.
 
 ### Configuration (File Handler)
 
@@ -966,25 +863,26 @@ Files survive container restarts. To clear all outputs, delete `./file_handler_d
 
 | Server | Registry key | Port | Tools | Storage | Auth |
 |---|---|---|---|---|---|
-| Memory | `memory` | `9494` | 9 | ChromaDB (`./chroma_data`) | None |
-| Web Search | `web_search` | `9393` | 8 | Stateless | None |
-| Web Scraper | `web_scraper` | `9292` | 1 | Stateless | None |
-| File Handler | `file_handler` | `9191` | 8 | Filesystem (`./file_handler_data`) | None |
+| Web Search | `web_search` | `9393` | 7 | Stateless | Optional (`SEARCH_SERVER_API_KEY`) |
+| Web Scraper | `web_scraper` | `9292` | 1 | Stateless | Optional (`SCRAPER_SERVER_API_KEY`) |
+| File Handler | `file_handler` | `9191` | 7 | Filesystem (`./data`) | Optional (`FILE_SERVER_API_KEY`) |
+
+Long-term memory is handled in-process via a direct Neo4j connection — it is not registered in the `MCPServerRegistry`.
 
 ---
 
 ## How the Research Agent Uses Each Server
 
-The agent interacts with these servers at different points in the research lifecycle. The backend registers all four servers at startup; the LLM then decides which tools to call during each step's tool-calling loop.
+The agent interacts with these servers at different points in the research lifecycle. The backend registers all three MCP servers at startup; the LLM then decides which tools to call during each step's tool-calling loop. Long-term memory is called directly (in-process) at plan and synthesis time.
 
-| Phase | Server | Tools called | Purpose |
+| Phase | Component | Call | Purpose |
 |---|---|---|---|
-| `generate_plan` | Memory | `recall_memories` | Prime planning prompt with relevant prior knowledge |
-| `_execute_step` | Web Search | `web_search`, `search_wikipedia`, `search_github` | Find relevant URLs and snippets |
-| `_execute_step` | Web Scraper | `scrape_url` | Fetch full page content from URLs found by search |
-| `_execute_step` | File Handler | `read_file`, `list_files` | Read any uploaded reference documents |
-| `synthesize_results` | Memory | `store_memory` | Persist research session and per-insight records |
-| `synthesize_results` | File Handler | `write_file` | Save the final Markdown research report |
+| `generate_plan` | `AsyncLongTermMemory` | `memory.recall(query)` | Prime planning prompt with relevant prior knowledge |
+| `_execute_step` | Web Search MCP | `web_search`, `search_wikipedia`, `search_github` | Find relevant URLs and snippets |
+| `_execute_step` | Web Scraper MCP | `scrape_url` | Fetch full page content from URLs found by search |
+| `_execute_step` | File Handler MCP | `read_file`, `list_files` | Read any uploaded reference documents |
+| `synthesize_results` | `AsyncLongTermMemory` | `memory.store(content, ...)` | Persist research session and per-insight records |
+| `synthesize_results` | File Handler MCP | `write_file` | Save the final Markdown research report |
 
 In the v2 Orchestrator, the same servers are used but routing goes through the specialist sub-agents: the `SearchAgent` primarily drives `web_search` and `scrape_url`, while the `ReportComposer` output is saved manually by the Orchestrator after `synthesise()` completes.
 
@@ -992,25 +890,30 @@ In the v2 Orchestrator, the same servers are used but routing goes through the s
 
 ## Running the Servers
 
-Start all four MCP servers using the dedicated compose file:
+Start everything (backend + Neo4j + frontend + all MCP servers):
 
 ```bash
-docker compose -f docker-compose-mcp.yml up --build
+docker compose up --build
 ```
 
-Start everything (backend + frontend + MCP servers) with the full stack compose file:
+Or using the full-stack compose file explicitly:
 
 ```bash
 docker compose -f docker-compose-full.yml up --build
 ```
 
-Verify individual server health:
+Verify individual MCP server health:
 
 ```bash
-curl http://localhost:9494/health   # Memory
 curl http://localhost:9393/health   # Web Search
 curl http://localhost:9292/health   # Web Scraper
 curl http://localhost:9191/health   # File Handler
+```
+
+Verify Neo4j (used by the in-process long-term memory):
+
+```bash
+curl http://localhost:7474   # Neo4j Browser UI
 ```
 
 ---
@@ -1049,7 +952,7 @@ curl http://localhost:9191/health   # File Handler
        mcp.run(transport="streamable-http")
    ```
 
-3. **Add a service to `docker-compose-mcp.yml`:**
+3. **Add a service to `docker-compose.yml`:**
 
    ```yaml
    mcp-my-server:
@@ -1061,29 +964,37 @@ curl http://localhost:9191/health   # File Handler
      restart: unless-stopped
      networks:
        - research-network
+     healthcheck:
+       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+       interval: 5s
+       timeout: 3s
+       retries: 10
+       start_period: 10s
    ```
 
 4. **Register the server in `backend/mcp_client.py`** inside `create_mcp_registry()`:
 
    ```python
-   servers = [
-       ...
-       ("my_server", config.my_server_url),
-   ]
+   await registry.register(
+       "my_server",
+       url=config.my_server_url,
+       transport="streamable-http",
+       builtin=True,
+   )
    ```
 
 5. **Add the URL to `Config`** (`backend/config.py`):
 
    ```python
    my_server_url: str = Field(
-       default_factory=lambda: os.getenv("MY_SERVER_URL", "http://localhost:9090")
+       default_factory=lambda: os.getenv("MY_SERVER_URL", "http://localhost:9090/mcp")
    )
    ```
 
    And expose the environment variable in your `.env` / Docker environment:
 
    ```
-   MY_SERVER_URL=http://mcp-my-server:9090
+   MY_SERVER_URL=http://mcp-my-server:9090/mcp
    ```
 
 The server's tools will be automatically discovered at registration time, added to `MCPServerRegistry.tool_specs`, and made available to the LLM's tool-calling loop without any further changes.

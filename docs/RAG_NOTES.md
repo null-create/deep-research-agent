@@ -46,25 +46,30 @@ The LoopAgent can call `SearchResultStore.mark_superseded(chunk_ids)` to flag ch
 
 ### Layer 2 — Cross-Session Long-Term Memory (`AsyncLongTermMemory`)
 
-Persistent storage backed by ChromaDB (in-process `PersistentClient`). Two sub-layers:
+Persistent storage backed by Neo4j (async driver). Two sub-layers:
 
-1. **Flat memory store** (`agent_memories` collection): raw text blobs with cosine similarity ranking. Raw evidence chunks and analyst claims are persisted here at the end of each session.
+1. **Flat memory store** (`:Memory` nodes): raw text blobs with cosine similarity ranking via a Neo4j vector index. Raw evidence chunks and analyst claims are persisted here at the end of each session.
 
-2. **Knowledge graph** (`KnowledgeGraph`): three additional ChromaDB collections that capture entities, relationships between entities, and community summaries. Used for relationship-aware recall that follows multi-hop entity connections across research sessions.
+2. **Knowledge graph** (`KnowledgeGraph`): typed entity nodes (Person, Organization, Technology, Concept, Event, Location, Metric), typed relationship edges (CAUSES, ENABLES, USES, etc.), Claim nodes, Document nodes, and Community summaries. Used for relationship-aware recall that follows multi-hop entity connections across research sessions.
 
 ```
                     ┌──────────────────────────────────────────────┐
                     │         AsyncLongTermMemory                  │
                     │                                              │
-                    │  {collection_name}           (flat vector store)   │
-                    │  {collection_name}_relations  (legacy, unused)   │
+                    │  :Memory nodes        (flat vector store)    │
                     │                                              │
                     │  ┌────────────────────────────────────────┐  │
                     │  │  KnowledgeGraph (ltm.graph)            │  │
                     │  │                                        │  │
-                    │  │  {collection_name}_kg_entities       (named concepts)   │  │
-                    │  │  {collection_name}_kg_relationships  (directed triples) │  │
-                    │  │  {collection_name}_kg_communities    (cluster summaries)│  │
+                    │  │  :Person / :Organization / :Technology  │  │
+                    │  │  :Concept / :Event / :Location / :Metric│  │
+                    │  │  :Claim    (assertions w/ confidence)   │  │
+                    │  │  :Document (source provenance)          │  │
+                    │  │  :Community (cluster summaries)         │  │
+                    │  │                                        │  │
+                    │  │  Typed edges: CAUSES, ENABLES, USES... │  │
+                    │  │  Structural: IS_A, CONTRADICTS,        │  │
+                    │  │    SOURCED_FROM, MEMBER_OF, ASSERTS     │  │
                     │  └────────────────────────────────────────┘  │
                     └──────────────────────────────────────────────┘
 ```
@@ -149,15 +154,66 @@ There are two separate dedup mechanisms:
 
 The knowledge graph captures **relationships between facts** — not just the facts themselves — so that cross-session recall can surface structural knowledge, entity connections, and thematic clusters.
 
-### Node & Edge Labels
+### Node Types (Typed Labels)
 
-The knowledge graph uses native Neo4j nodes and relationships:
+Each entity type has its own Neo4j label, uniqueness constraint, and vector index:
 
-| Collection | Stores | Key metadata |
+| Node Label | Stores | Type-Specific Properties |
 |---|---|---|
-| `:Entity` nodes | Named entities embedded by `name: description` | `name`, `entity_type` (person/org/technology/concept/event/location/metric), `mention_count`, `source_sessions`, `first_seen`, `last_seen` |
-| `:RELATES_TO` edges | Directed triples embedded by `source → relation → target \| evidence` | `source_entity`, `target_entity`, `relation_type`, `confidence`, `session_id`, `step_id` |
-| `:Community` nodes | LLM-generated cluster summaries (plain text) | `entity_ids` (JSON list), `topic`, `created_at` |
+| `:Person` | People | `affiliation`, `role`, `expertise_areas` |
+| `:Organization` | Companies/institutions | `org_type`, `industry`, `headquarters` |
+| `:Technology` | Tools/frameworks | `tech_category`, `version`, `license`, `maturity` |
+| `:Concept` | Abstract ideas | `domain`, `abstraction_level` |
+| `:Event` | Temporal occurrences | `start_date`, `end_date`, `event_type`, `location` |
+| `:Location` | Geographic entities | `geo_type`, `parent_location` |
+| `:Metric` | Quantitative data | `value`, `unit`, `measurement_date`, `trend` |
+
+All entity types share base properties: `id`, `name`, `entity_type`, `description`, `mention_count`, `source_sessions`, `first_seen`, `last_seen`, `last_confirmed`, `confirmation_count`, `embedding`.
+
+Additional node types:
+
+| Node Label | Stores | Key Properties |
+|---|---|---|
+| `:Memory` | Raw evidence text blobs | `content`, `category`, `importance`, `tags` |
+| `:Claim` | Individual assertions | `text`, `confidence`, `status` (supported/disputed/unverified/retracted), `source_session` |
+| `:Document` | Research source documents | `url` (unique), `title`, `content_summary`, `doc_type`, `credibility_score`, `domain` |
+| `:Community` | LLM-generated cluster summaries | `entity_ids`, `topic`, `summary` |
+
+### Relationship Types (Typed Labels)
+
+Factual relationships use typed Neo4j labels instead of a single `:RELATES_TO`:
+
+| Label | Semantics | Example |
+|---|---|---|
+| `CAUSES` | Causal relationship | Climate change → CAUSES → sea level rise |
+| `ENABLES` | Facilitation | GPU computing → ENABLES → deep learning |
+| `PREVENTS` | Inhibition | Vaccination → PREVENTS → disease spread |
+| `REQUIRES` | Dependency | Machine learning → REQUIRES → training data |
+| `PART_OF` | Containment | GPU → PART_OF → NVIDIA A100 |
+| `USES` | Utilization | GPT-4 → USES → transformer architecture |
+| `PRODUCES` | Output | Solar panel → PRODUCES → electricity |
+| `COMPETES_WITH` | Competition | AWS → COMPETES_WITH → Azure |
+| `AFFILIATED_WITH` | Membership | Researcher → AFFILIATED_WITH → MIT |
+| `AUTHORED_BY` | Authorship | Paper → AUTHORED_BY → Researcher |
+| `FUNDED_BY` | Financial backing | Startup → FUNDED_BY → VC firm |
+| `PRECEDED_BY` | Temporal ordering | GPT-4 → PRECEDED_BY → GPT-3 |
+| `OCCURRED_AT` | Location/venue | Conference → OCCURRED_AT → San Francisco |
+| `ASSERTS` | Claim-entity link | Claim → ASSERTS → Entity |
+| `SUPPORTS` | Evidence support | Document → SUPPORTS → Claim |
+| `REFUTES` | Contradiction | Finding → REFUTES → Claim |
+| `MENTIONS` | Reference | Document → MENTIONS → Entity |
+| `RELATES_TO` | Catch-all fallback | Used when no specific label matches |
+
+Free-form verb phrases from LLM extraction are classified into typed labels via keyword matching (`classify_relation()` in `long_term_memory.py`). Unmatched phrases fall back to `RELATES_TO`.
+
+Structural (non-factual) relationship labels:
+
+| Label | Semantics |
+|---|---|
+| `IS_A` | Hierarchical taxonomy (child → parent) |
+| `CONTRADICTS` | Flags conflicting claims between entities |
+| `SOURCED_FROM` | Entity → Document provenance |
+| `MEMBER_OF` | Entity → Community membership |
 
 ### Entity Deduplication
 
@@ -165,7 +221,7 @@ When upserting an entity, the graph embeds the new entity's `name: description` 
 
 ### Graph Extraction (Write Path)
 
-After each analyst step completes its QA loop, `Orchestrator._extract_graph_triples()` makes **one LLM call** to extract structured entities and relationships from the step's vetted claims:
+After each analyst step completes its QA loop, `Orchestrator._extract_graph_triples()` makes **one LLM call** to extract structured entities, relationships, and claims from the step's vetted findings:
 
 ```
 Analyst claims (QA-vetted)
@@ -173,12 +229,17 @@ Analyst claims (QA-vetted)
        ▼
   _extract_graph_triples()
        │
-       ├── Build extraction prompt with claims text
-       ├── LLM returns JSON: {entities: [...], relationships: [...]}
+       ├── Build extraction prompt with claims text + existing graph context
+       ├── LLM returns JSON: {entities: [...], relationships: [...], claims: [...]}
        ├── Parse JSON (strip markdown fences if present)
-       ├── For each entity  → graph.upsert_entity()
-       └── For each relationship → graph.store_relationship()
+       ├── For each entity  → graph.upsert_entity(name, type, properties)
+       │     └── If parent_type provided → graph.upsert_entity(parent) + graph.store_hierarchy()
+       ├── For each relationship → graph.store_relationship(source, target, label)
+       │     └── If source_url provided → graph.store_document() + graph.link_document_to_entity()
+       └── For each claim → graph.store_claim(text, confidence, entity_names)
 ```
+
+The extraction prompt requests type-specific properties per entity type (e.g., `affiliation` for Person, `version` for Technology) and explicit relationship labels from the typed vocabulary. The LLM can also provide a `label` field to suggest a specific relationship type, which is validated against the typed vocabulary before storage.
 
 Only QA-vetted claims are extracted — raw search results are never fed to the graph. This keeps the graph's signal-to-noise ratio high.
 
@@ -187,10 +248,12 @@ Only QA-vetted claims are extracted — raw search results are never fed to the 
 `Orchestrator._recall_memories(query, limit=N)` combines two sources. It is called in two places: during `plan()` with `limit=5` (default) and during `synthesize()` Phase B with `limit=8`.
 
 1. **Graph-aware recall** via `graph.recall_graph_context(query, entity_limit=5, max_hops=2)`:
-   - Vector-search entities relevant to the query (top 5)
-   - Traverse up to 2 hops of relationships from seed entities
+   - Vector-search entities relevant to the query (top 5) across all typed entity indexes
+   - Traverse up to 2 hops of typed relationships from seed entities
+   - Retrieve claims linked to seed entities
    - Retrieve community summaries for overlapping entity clusters
-   - Format as structured text (`KNOWN ENTITIES`, `KNOWN RELATIONSHIPS`, `THEMATIC CLUSTERS`)
+   - Format as structured text (`KNOWN ENTITIES`, `KNOWN RELATIONSHIPS`, `CLAIMS`, `THEMATIC CLUSTERS`)
+   - Optionally include `KNOWN CONTRADICTIONS` and `SOURCE DOCUMENTS`
 
 2. **Flat vector search** via `find_similar(query, limit=N, min_similarity=0.5)`:
    - Cosine rank over the flat memory collection
@@ -202,7 +265,7 @@ During planning, both are injected into the Root agent's planning prompt under "
 
 After `Orchestrator.synthesize()` emits the `report` event and persists session chunks, it calls `graph.update_communities(summarize_fn)`:
 
-1. Fetch all relationships and build an adjacency graph by entity name
+1. Fetch all typed factual relationships and build an adjacency graph by entity name
 2. Greedy BFS clustering: entities sharing ≥ `_COMMUNITY_MIN_SHARED_RELS` (2) connections are grouped
 3. For each cluster: build context from entity descriptions + intra-cluster relationships
 4. LLM generates a concise summary per cluster
