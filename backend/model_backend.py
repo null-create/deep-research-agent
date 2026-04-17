@@ -447,10 +447,11 @@ class OllamaBackend(ModelBackend):
         )
 
         try:
+            formatted_tools = _format_tools_for_ollama(tools or [])
             response = await self.client.chat(
                 model=model or self.model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                tools=tools or [],
+                tools=formatted_tools,
                 options={"num_predict": max_tokens, "temperature": temperature},
             )
 
@@ -480,10 +481,11 @@ class OllamaBackend(ModelBackend):
         tools: Optional[List[Dict]] = None,
     ) -> AsyncIterator[str]:
         try:
+            formatted_tools = _format_tools_for_ollama(tools or [])
             stream = await self.client.chat(
                 model=self.model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                tools=tools or [],
+                tools=formatted_tools,
                 options={"num_predict": MAX_TOKENS, "temperature": TEMPERATURE},
                 stream=True,
             )
@@ -611,6 +613,34 @@ class HuggingFaceBackend(ModelBackend):
             )
             raise
         return None
+
+
+def _strip_none_values(obj: Any) -> Any:
+    """Recursively remove None values from JSON schemas"""
+    if isinstance(obj, dict):
+        return {k: _strip_none_values(v) for k, v in obj.items() if v is not None}
+    elif isinstance(obj, list):
+        return [_strip_none_values(item) for item in obj if item is not None]
+    return obj
+
+
+def _format_tools_for_ollama(tools: list[dict]) -> List[Dict[str, Any]]:
+    """Convert flat tool format to Ollama's nested function format and strip None values"""
+    formatted = []
+    for t in tools:
+        func = t.get("function", t)
+        params = func.get("parameters", {})
+        formatted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "parameters": _strip_none_values(params) if params else {},
+                },
+            }
+        )
+    return formatted
 
 
 def format_tool_calls(tool_calls: list[dict]) -> List[Dict[str, Any]]:
