@@ -8,6 +8,7 @@ boto3
 neo4j
 fastapi
 httpx
+fpdf2
 huggingface_hub
 mcp
 ollama
