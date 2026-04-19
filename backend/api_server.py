@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 # ── Config persistence ────────────────────────────────────────────────────────
 _SETTINGS_FILE = Path(
     os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.abspath(__file__)),
         "configs",
         "model_settings.json",
     )
