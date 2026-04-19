@@ -4,9 +4,7 @@ long_term_memory.py
 Persistent cross-session memory store backed by Neo4j, with an integrated
 knowledge graph (GraphRAG) for capturing relationships between facts.
 
-Replaces the standalone memory MCP server (mcp/memory/) by running the same
-persistence logic in-process alongside the FastAPI backend.  Embedding is
-handled by the shared embeddings.py module (sentence-transformers +
+Embedding is handled by the shared embeddings.py module (sentence-transformers +
 ThreadPoolExecutor), so there is exactly one model instance and one thread-pool
 in the process.
 
