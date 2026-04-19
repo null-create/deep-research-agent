@@ -783,11 +783,8 @@ class KnowledgeGraph:
     Relationship-aware knowledge graph stored natively in Neo4j.
 
     Typed entity nodes (Person, Organization, Technology, Concept, Event,
-    Location, Metric) replace the old generic Entity label.  Each type has
-    its own vector index for semantic search and type-specific properties.
-
-    Typed relationship labels (CAUSES, ENABLES, USES, etc.) replace the old
-    catch-all RELATES_TO.  Free-form verb phrases are classified via keyword
+    Location, Metric) has its own vector index for semantic search and
+    type-specific properties. Free-form verb phrases are classified via keyword
     matching into typed labels; unmatched phrases fall back to RELATES_TO.
 
     Claim nodes store individual assertions linked to entities and documents.
