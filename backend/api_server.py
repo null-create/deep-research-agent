@@ -51,6 +51,7 @@ _SETTINGS_FILE = Path(
 def _load_persisted_settings() -> dict:
     """Load overrides from the model_settings.json file if it exists."""
     if _SETTINGS_FILE.exists():
+        logger.info("Loading persisted configurations...")
         try:
             return json.loads(_SETTINGS_FILE.read_text())
         except Exception as exc:
