@@ -41,7 +41,7 @@ logger = get_logger(__name__)
 # ── Config persistence ────────────────────────────────────────────────────────
 _SETTINGS_FILE = Path(
     os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "configs",
         "model_settings.json",
     )
@@ -51,7 +51,6 @@ _SETTINGS_FILE = Path(
 def _load_persisted_settings() -> dict:
     """Load overrides from the model_settings.json file if it exists."""
     if _SETTINGS_FILE.exists():
-        logger.info("Loading persisted configurations...")
         try:
             return json.loads(_SETTINGS_FILE.read_text())
         except Exception as exc:

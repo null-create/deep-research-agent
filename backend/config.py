@@ -311,7 +311,7 @@ class Config(BaseModel):
     )
     # Model used for heavy tasks (planning, synthesis, report generation).
     azure_heavy_model: str = Field(
-        default_factory=lambda: os.getenv("AZURE_HEAVY_MODEL", "gpt-5.4")
+        default_factory=lambda: os.getenv("AZURE_HEAVY_MODEL", "gpt-5.2")
     )
     # Model used for light tasks (search execution, analyst extraction).
     azure_light_model: str = Field(
@@ -325,7 +325,7 @@ class Config(BaseModel):
     # Default Bedrock model identifier.
     aws_model: str = Field(
         default_factory=lambda: os.getenv(
-            "AWS_MODEL", "global.anthropic.claude-sonnet-4-6"
+            "AWS_MODEL", "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
         )
     )
     # Model used for heavy tasks (planning, synthesis, report generation).

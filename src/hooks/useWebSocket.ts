@@ -7,6 +7,8 @@ const RECONNECT_MAX_ATTEMPTS = 10;
 interface UseWebSocketOptions {
   /** Called once a re-connection (not the initial connection) succeeds. */
   onReconnected?: () => void;
+  /** Called on the very first successful connection (not re-connections). */
+  onInitialConnect?: () => void;
 }
 
 export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
@@ -26,6 +28,11 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   useEffect(() => {
     onReconnectedRef.current = options.onReconnected;
   }, [options.onReconnected]);
+
+  const onInitialConnectRef = useRef(options.onInitialConnect);
+  useEffect(() => {
+    onInitialConnectRef.current = options.onInitialConnect;
+  }, [options.onInitialConnect]);
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectAttemptsRef.current >= RECONNECT_MAX_ATTEMPTS) {
@@ -72,6 +79,10 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
         setTimeout(() => {
           onReconnectedRef.current?.();
         }, 150);
+      } else {
+        // First-ever connection — notify the caller so it can resume a
+        // session that was active before a hard page refresh.
+        onInitialConnectRef.current?.();
       }
       hasConnectedOnceRef.current = true;
     };

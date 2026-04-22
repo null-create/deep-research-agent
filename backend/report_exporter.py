@@ -45,11 +45,41 @@ def _get_reports_dir() -> Path:
     return Path(raw)
 
 
-def _sanitize_filename(text: str, max_len: int = 60) -> str:
-    """Turn arbitrary text into a safe filename fragment."""
-    text = re.sub(r"[^\w\s-]", "", text).strip()
-    text = re.sub(r"\s+", "_", text)
-    return text[:max_len] if text else "report"
+# Common English stopwords that add no meaning to a filename.
+_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "up", "about", "into", "through", "is",
+        "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may",
+        "might", "shall", "can", "what", "where", "when", "why", "how",
+        "which", "who", "whom", "this", "that", "these", "those", "it",
+        "its", "we", "they", "you", "i", "my", "our", "your", "their",
+        "his", "her", "some", "any", "all", "each", "as", "if", "than",
+        "so", "yet", "both", "just", "more", "most", "also", "me", "us",
+    }
+)
+
+
+def _query_to_slug(query: str, max_words: int = 5) -> str:
+    """
+    Produce a short, human-readable filename slug from a research query.
+
+    Strips punctuation and common stopwords, takes up to *max_words* of the
+    remaining meaningful terms, title-cases them, and joins with underscores.
+
+    Example: "What are the geopolitical implications of rare earth scarcity?"
+             → "Geopolitical_Implications_Rare_Earth_Scarcity"
+    """
+    # Remove non-alphanumeric characters (keep spaces and hyphens)
+    cleaned = re.sub(r"[^\w\s-]", " ", query).strip()
+    words = cleaned.split()
+    meaningful = [
+        w for w in words if w.lower() not in _STOPWORDS and len(w) > 1
+    ]
+    chosen = meaningful[:max_words] if meaningful else words[:max_words]
+    slug = "_".join(w.capitalize() for w in chosen)
+    return slug if slug else "report"
 
 
 def _extract_title(document: str, query: str) -> str:
@@ -214,8 +244,7 @@ async def export_report_pdf(
     try:
         reports_dir = _get_reports_dir()
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        title = _extract_title(document, query)
-        slug = _sanitize_filename(title)
+        slug = _query_to_slug(query)
         sid_part = (session_id or "cli")[:8]
         filename = f"{date_str}_{sid_part}_{slug}.pdf"
         output_path = reports_dir / filename

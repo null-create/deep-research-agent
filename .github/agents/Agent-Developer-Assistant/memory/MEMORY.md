@@ -1,5 +1,16 @@
 # Agent Memory — Research Assistant
 
+## 2026-04-22 (Session resume after hard page refresh)
+
+- **Root cause:** `activeSessionIdRef` and `researchConvIdRef` are in-memory `useRef`s — lost on hard refresh. `handleReconnected` was only called on WebSocket re-connections, not on the initial connection after a refresh. Backend fully supports replay but frontend never sent the `resume` message on initial connect.
+- **Fix — frontend only, no backend changes needed:**
+  1. `useWebSocket.ts`: Added `onInitialConnect` callback option (fires on first `ws.onopen`; `onReconnected` fires on subsequent opens). Both stored in refs for stability.
+  2. `App.tsx`: Both `useRef`s now pre-populated via `sessionStorage.getItem()` as initial value — safe because WS `onopen` is async and all React `useEffect`s complete before the network handshake.
+  3. `SS_SESSION_ID` / `SS_CONV_ID` sessionStorage keys written on `session_created` + `handleSendMessage`, cleared on `report`, `research_stopped`, `plan_denied`, `error`.
+  4. `handleInitialConnect`: reads sessionStorage and sends `{ type: 'resume', session_id }` if stored session exists.
+  5. **Replay deduplication:** `replayCountRef = useRef(0)`. Set to `event_count` from `session_resumed`. In message loop, all non-control events decrement counter and set `isReplayedEvent = true` while > 0. `addMessageToConv`, `initFromPlan`, and `addSynthesisNode` guarded with `if (!isReplayedEvent)`. Graph state transitions are NOT guarded — they're idempotent.
+- **Key patterns:** `onInitialConnect` does NOT need the 150ms delay that `onReconnected` has — backend is already up on page load. `session_resumed` reconnect notification message is always added (not guarded) since it's a new message. `error` handler always clears sessionStorage since errors during a resume leave no valid session to return to.
+
 ## 2026-04-15 (Knowledge Graph Schema Redesign — Typed Nodes, Relations, Claims, Documents)
 
 - **Full rewrite of `long_term_memory.py`**: Replaced single `:Entity` node type with 7 typed Neo4j labels (`:Person`, `:Organization`, `:Technology`, `:Concept`, `:Event`, `:Location`, `:Metric`). Each type has its own uniqueness constraint, vector index, and type-specific properties (e.g., Person.affiliation, Technology.version, Metric.value+unit).
