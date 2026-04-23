@@ -22,7 +22,7 @@ from config import Config
 from mcp_client import create_mcp_registry
 from model_backend import create_model_backend
 from optimization import SelfOptimizingAgent
-from advanced_features import AdvancedResearchAgent
+from research_agent import ResearchAgent
 from long_term_memory import AsyncLongTermMemory
 from orchestrator import Orchestrator, AgentPool
 from models import ConfigUpdate, ResearchPlan, ResearchStep, ResponseMessage
@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
         )
         logger.info("Initialized Self-Optimizing Agent in self-optimization mode.")
     else:
-        app.state.agent = AdvancedResearchAgent(model_backend, mcp_registry)
+        app.state.agent = ResearchAgent(model_backend, mcp_registry)
         logger.info("Agent is initialized and ready to accept requests.")
 
     # Always initialise a dedicated SelfOptimizingAgent so the self_optimize
@@ -303,7 +303,7 @@ def make_serializable(obj: Any) -> list[Any] | dict[Any, Any] | Any:
 # ── Dependencies ──────────────────────────────────────────────────────────────
 def get_agent(
     request: Request,
-) -> AdvancedResearchAgent | SelfOptimizingAgent:
+) -> ResearchAgent | SelfOptimizingAgent:
     agent = request.app.state.agent
     if agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
@@ -657,7 +657,7 @@ async def get_mcp_server_detail(name: str, request: Request):
 
 @app.get("/mcp/tools")
 async def list_tools(
-    agent: AdvancedResearchAgent | SelfOptimizingAgent = Depends(get_agent),
+    agent: ResearchAgent | SelfOptimizingAgent = Depends(get_agent),
 ):
     tools = await agent.mcp_servers.get_all_tools()
     return {"tools": tools}
@@ -818,8 +818,7 @@ async def update_config(request: Request, config_update: ConfigUpdate):
         await new_agent_pool.async_init(request.app.state.mcp_registry)
         request.app.state.model_backend = new_backend
         request.app.state.agent_pool = new_agent_pool
-        # Also update the /chat AdvancedResearchAgent
-        request.app.state.agent = AdvancedResearchAgent(
+        request.app.state.agent = ResearchAgent(
             new_backend, request.app.state.mcp_registry
         )
         request.app.state.config = cfg
@@ -1079,7 +1078,7 @@ async def graph_documents(
 @app.post("/chat")
 async def chat_endpoint(
     message: dict[str, str],
-    agent: AdvancedResearchAgent | SelfOptimizingAgent = Depends(get_agent),
+    agent: ResearchAgent | SelfOptimizingAgent = Depends(get_agent),
 ):
     """
     Streaming chat endpoint for testing the agent's response generation without

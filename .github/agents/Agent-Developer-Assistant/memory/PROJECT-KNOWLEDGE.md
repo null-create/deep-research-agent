@@ -33,8 +33,6 @@ research-assistant/
 ├── src/              React/TypeScript frontend (Vite); src/README.md is the frontend-specific dev guide
 ├── mcp/              Standalone MCP protocol servers
 │   └── auth/         JWT auth handler shared by MCP servers (JWTAuthHandler, TokenVerifier)
-├── infra/
-│   └── azure/        Terraform IaC for Azure Container Apps deployment (12 files — see §Infrastructure)
 ├── docs/             Architecture and API documentation (7 files: API_SERVER, CLI, MCP_SERVERS, ORCHESTRATOR, RAG_NOTES, RESEARCH_AGENT, BENCHMARKING)
 ├── scripts/          Operational scripts; `benchmark.py` — DeepResearch Bench runner; `migrate_chroma_to_neo4j.py` — one-time data migration
 ├── README.md         Thin landing page: quick start, Makefile commands, config example, docs table
@@ -57,9 +55,9 @@ research-assistant/
 |------|------|
 | `api_server.py` | FastAPI app, lifespan (agent/orchestrator init), REST endpoints, WebSocket handler (`/ws/research`), session drain/reconnect. `_recover_session_from_checkpoint(app_state, session_manager, session_store, checkpoint_data)` restores orchestrator synthesis state from disk and re-runs `synthesize()` as a tracked background job — called by the `resume` handler on in-memory miss. REST endpoints include `GET /project-docs` (list `.md` filenames from `docs/`) and `GET /project-docs/{filename}` (return content; path-traversal protected). NOTE: route is `/project-docs` not `/docs` — FastAPI reserves `/docs` for Swagger UI. **Shutdown guard:** `app.state.shutting_down` flag set to `True` at start of `_shutdown()`; WS handler checks it alongside `agent_pool` to reject new sessions during teardown. **Cancel-of-complete fix:** `_run_session` CancelledError handler checks `replay_log` for existing `report` events — if present, sets `state="complete"` instead of `"cancelled"`. |
 | `orchestrator.py` | `Orchestrator` + `AgentPool` + five sub-agents (Root, Search, Analyst, Loop, Report); per-step RAG constants; multi-pass synthesis. `AgentPool.from_single_backend(backend)` + `.async_init(registry)` is the canonical construction path. `research_depth` param ("shallow"/"moderate"/"deep") controls QA loop: shallow skips it, moderate=2 retries, deep=3 retries + enhanced prompts. `synthesis_checkpoint()` returns a JSON-safe dict of synthesis inputs (`_analyst_output`, `_step_summaries`, `_step_sources`, `_contradictions`, query); `restore_synthesis_state(checkpoint)` reconstructs those fields for post-restart recovery. `release_memory()` frees heavy intermediate buffers after session completes (called by `_run_session` finally block to prevent OOM during long benchmark runs). `_is_synthesis_step(step)` static method returns `True` when a step description matches synthesis/report-generation phrases (19 signals); `_run_step()` uses it to skip such steps immediately with `skipped_synthesis: True` in the event data — final report assembly is exclusively handled by `synthesize()`. `_root_system_prompt()` has an explicit `CRITICAL CONSTRAINT` prohibiting synthesis steps from the plan. |
-| `research_agent.py` | `ResearchAgent` base class: plan generation, step execution, basic synthesis |
-| `advanced_features.py` | `AdvancedResearchAgent`: parallel step execution, credibility scoring |
-| `optimization.py` | `SelfOptimizingAgent`: five-phase self-optimize workflow (read_methods → retrieve_memories → analyze → develop → update_methods). Accepts `Optional[AsyncLongTermMemory]`; `get_all_memories()` queries both flat `.recall(limit=100)` AND `graph.recall_graph_context()` (entity_limit=20, max_hops=2) — returns graph context under `"knowledge_graph"` key + stats under `"graph_stats"`. `_analyze_memories()` prompt instructs LLM to analyze entity clusters, relationship patterns, and thematic clusters. Phase 5 persists insights via `_long_term_memory.store(category="optimization_insight", importance=8)`. Reads/writes `backend/instructions/RESEARCH-METHODS.md`. Also contains unused utility classes (`AsyncCache`, `BatchProcessor`, `OptimizedResearchAgent`). |
+| `research_agent.py` | `ResearchAgent` base class — legacy v1. Now only 3 members: `__init__` (sets `self.model`, `self.mcp_servers`), `chat()` (streaming single-turn response for `/chat` endpoint), `_select_model_for_step()` (used by `SelfOptimizingAgent`). ~143 lines. |
+| `advanced_features.py` | `AdvancedResearchAgent(ResearchAgent)` — legacy v1 thin passthrough subclass. Retained only to preserve the import path used by `api_server.py`. All methods removed; class is now ~25 lines total. |
+| `optimization.py` | `SelfOptimizingAgent`: five-phase self-optimize workflow (read_methods → retrieve_memories → analyze → develop → update_methods). Accepts `Optional[AsyncLongTermMemory]`; `get_all_memories()` queries both flat `.recall(limit=100)` AND `graph.recall_graph_context()` (entity_limit=20, max_hops=2) — returns graph context under `"knowledge_graph"` key + stats under `"graph_stats"`. `_analyze_memories()` prompt instructs LLM to analyze entity clusters, relationship patterns, and thematic clusters. Phase 5 persists insights via `_long_term_memory.store(category="optimization_insight", importance=8)`. Reads/writes `backend/instructions/RESEARCH-METHODS.md`. Dead utility classes (`AsyncCache`, `BatchProcessor`, `OptimizedResearchAgent`) removed 2026-04-23. |
 | `pipeline.py` | `PipelineRunner`: `MAX_CONCURRENT_PIPELINES=5` semaphore, cross-pipeline query dedup |
 | `session_manager.py` | `ResearchSessionManager`: owns all background tasks, graceful shutdown. Accepts `max_concurrent_sessions` (default 10 via `MAX_CONCURRENT_SESSIONS` env var); when >0, `start_job()` wraps coroutines with a `Semaphore`-gated wrapper so at most N pipelines execute concurrently. |
 | `session_store.py` | Session storage — in-memory registry + disk persistence. `SessionStore.persist(session, synthesis_checkpoint=None)` writes `logs/sessions/{session_id}.json` atomically (`.tmp` rename; respects `LOG_DIR` env var). `SessionStore.load_checkpoint(session_id)` reads it back (returns `None` if absent or corrupted). TTL-based eviction via `prune_expired()` called on each new query. Checkpoint written after `execute()` completes and in `finally`. |
@@ -342,51 +340,5 @@ All subsystems confirmed green:
 - `chroma_data/` is the legacy ChromaDB persist directory. Retained for migration via `scripts/migrate_chroma_to_neo4j.py`. Can be deleted after successful migration.
 - Neo4j data persisted in Docker named volume `neo4j_data` (mapped to `/data` in container). Reset with `docker volume rm research-assistant_neo4j_data`.
 - `pipeline.py` query dedup uses a flat string set — collisions possible if the same semantic query is worded differently (future: embed + cosine dedup)
-- `backend/instructions/` bind-mount (`./backend/instructions:/app/instructions`) added to both `docker-compose.yml` and `docker-compose-full.yml` (2026-03-19). **Not yet mirrored in `infra/azure/containers.tf`** — needed if self-optimize is used in ACA.
+- `backend/instructions/` bind-mount (`./backend/instructions:/app/instructions`) added to both `docker-compose.yml` and `docker-compose-full.yml` (2026-03-19).
 - Session state is **in-memory only** — all sessions lost on restart; no persistence layer
-- **Frontend nginx proxy**: `host.docker.internal:9999` in `src/nginx.conf` doesn't resolve in Azure Container Apps. Must use envsubst in nginx.conf (replace proxy target with `${NGINX_BACKEND_URL}`) or bake `VITE_WS_URL` as a build arg at CI time. See `infra/azure/README.md §4`.
-
----
-
-## Infrastructure (`infra/azure/`)
-
-Full Terraform IaC for deploying the stack to Azure Container Apps. Validated with `terraform validate` against azurerm ~4.0.
-
-| File | Purpose |
-|------|---------|
-| `main.tf` | Terraform + azurerm/random providers, partial `azurerm` backend, shared `locals` (prefix, tags, MCP internal FQDNs) |
-| `variables.tf` | All inputs: SP credentials, location, project_name, image_tag, ACR SKU, LLM creds, MCP API/secret keys, embeddings toggle |
-| `outputs.tf` | frontend_url, backend_url, backend_ws_url, container_registry_login_server, image_names map |
-| `backend.conf` | Remote state connection values — populate from secrets before `terraform init`; gitignored |
-| `terraform.tfvars` | Credential template — gitignored; generated from secrets at CI/CD runtime |
-| `resource_group.tf` | `azurerm_resource_group` |
-| `registry.tf` | ACR (`acr_sku` variable) + user-assigned managed identity with `AcrPull` role, shared by all Container Apps |
-| `storage.tf` | Storage account + two Azure File Shares: `chroma-data` (10 GB) and `file-handler-data` (10 GB) |
-| `log_analytics.tf` | Log Analytics workspace (mandatory for Container Apps environment) |
-| `container_env.tf` | Container Apps environment + two `azurerm_container_app_environment_storage` mounts for the File Shares |
-| `containers.tf` | All 6 Container Apps (see table below) |
-
-### Container Apps
-
-| App resource | Ingress | Port | CPU/Mem | Volumes | Notes |
-|---|---|---|---|---|---|
-| `mcp_web_search` | Internal | 9393 | 0.25 / 0.5Gi | — | 1/2 replicas |
-| `mcp_web_scrape` | Internal | 9292 | 0.25 / 0.5Gi | — | 1/2 replicas |
-| `mcp_file_handler` | Internal | 9191 | 0.25 / 0.5Gi | file-handler-data → /app/data | 1/1 replicas (stateful) |
-| `backend` | **External** | 9999 | 2.0 / 4Gi | chroma-data → /app/chroma_data | transport=auto (WebSocket), 1/3 replicas; do not scale to zero |
-| `frontend` | **External** | 80 | 0.25 / 0.5Gi | — | 1/3 replicas; depends_on backend |
-
-### ACA-specific schema notes (azurerm 4.x)
-
-- `volume_mounts {}` (not `volume_mount`) inside container blocks
-- `storage_account_id` (not `storage_account_name`) in `azurerm_storage_share`
-- No `sticky_sessions_affinity` attribute in `azurerm_container_app` ingress block
-- `transport = "auto"` enables WebSocket on the backend ingress
-
-### State storage bootstrap
-
-The `rg-tfstate` resource group + storage account + `tfstate` blob container must be created manually **before** `terraform init`. See `infra/azure/README.md §1`.
-
-### gitignore additions (2026-03-18)
-
-Added to `.gitignore`: `infra/azure/terraform.tfvars`, `infra/azure/backend.conf`, `infra/azure/.terraform/`, `infra/azure/.terraform.lock.hcl`, `infra/azure/*.tfstate*`, `infra/azure/*.tfplan`

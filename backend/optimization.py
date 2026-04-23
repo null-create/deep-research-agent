@@ -1,14 +1,11 @@
 import os
-import time
 import json
-import hashlib
-import asyncio
 from datetime import datetime, timezone
-from dataclasses import dataclass
-from typing import List, Dict, Any, Callable, Optional, AsyncIterator
+from typing import List, Dict, Any, Optional, AsyncIterator
 
 from models import ResponseMessage
-from research_agent import ResearchAgent, Message
+from research_agent import ResearchAgent
+from model_backend import Message
 from observability import get_logger
 from long_term_memory import AsyncLongTermMemory
 
@@ -21,169 +18,10 @@ RESEARCH_METHODS_PATH = os.path.join(
 )
 
 
-@dataclass
-class CacheEntry:
-    data: Any
-    timestamp: float
-    ttl: float
-
-    def is_expired(self) -> bool:
-        return time.time() - self.timestamp > self.ttl
-
-
-class AsyncCache:
-    """Simple async cache for expensive operations"""
-
-    def __init__(self, default_ttl: float = 3600):
-        self.cache: Dict[str, CacheEntry] = {}
-        self.default_ttl = default_ttl
-
-    def _generate_key(self, *args, **kwargs) -> str:
-        """Generate cache key from arguments"""
-        key_data = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True)
-        return hashlib.md5(key_data.encode()).hexdigest()
-
-    async def get(
-        self, key: str, compute_fn: Callable, ttl: Optional[float] = None
-    ) -> Any:
-        """Get from cache or compute"""
-        # Check cache
-        if key in self.cache:
-            entry = self.cache[key]
-            if not entry.is_expired():
-                return entry.data
-            else:
-                del self.cache[key]
-
-        # Compute and cache
-        data = await compute_fn()
-        self.cache[key] = CacheEntry(
-            data=data, timestamp=time.time(), ttl=ttl or self.default_ttl
-        )
-        return data
-
-    def invalidate(self, key: str):
-        """Invalidate cache entry"""
-        if key in self.cache:
-            del self.cache[key]
-
-    def clear(self):
-        """Clear all cache"""
-        self.cache.clear()
-
-
-class BatchProcessor:
-    """Process multiple items in batches for efficiency"""
-
-    def __init__(self, batch_size: int = 5, max_concurrent: int = 3):
-        self.batch_size = batch_size
-        self.max_concurrent = max_concurrent
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def process_batch(
-        self, items: List[Any], process_fn: Callable[[Any], Any]
-    ) -> List[Any]:
-        """Process items in batches with concurrency control"""
-        results = []
-
-        for i in range(0, len(items), self.batch_size):
-            batch = items[i : i + self.batch_size]
-
-            async def process_with_semaphore(item):
-                async with self.semaphore:
-                    return await process_fn(item)
-
-            batch_results = await asyncio.gather(
-                *[process_with_semaphore(item) for item in batch],
-                return_exceptions=True,
-            )
-
-            results.extend(batch_results)
-
-        return results
-
-
-class OptimizedResearchAgent:
-    """Research agent with performance optimizations"""
-
-    def __init__(
-        self,
-        model_backend,
-        mcp_registry,
-        enable_cache: bool = True,
-        enable_batching: bool = True,
-    ):
-        self.model_backend = model_backend
-        self.mcp_registry = mcp_registry
-        self.enable_cache = enable_cache
-        self.enable_batching = enable_batching
-
-        if enable_cache:
-            self.cache = AsyncCache(default_ttl=3600)
-
-        if enable_batching:
-            self.batch_processor = BatchProcessor(batch_size=5, max_concurrent=3)
-
-    async def search_with_cache(
-        self, query: str, max_results: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Search with caching"""
-        if not self.enable_cache:
-            return await self._search(query, max_results)
-
-        cache_key = f"search_{query}_{max_results}"
-
-        async def compute():
-            return await self._search(query, max_results)
-
-        return await self.cache.get(cache_key, compute, ttl=1800)
-
-    async def _search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
-        """Actual search implementation"""
-        search_client = self.mcp_registry.get("search")
-        if not search_client:
-            return []
-
-        result = await search_client.call_tool(
-            "search", {"query": query, "max_results": max_results}
-        )
-        return result.get("results", [])
-
-    async def scrape_urls_parallel(self, urls: List[str]) -> List[Dict[str, Any]]:
-        """Scrape multiple URLs in parallel with batching"""
-        if not self.enable_batching:
-            return await asyncio.gather(*[self._scrape_url(url) for url in urls])
-
-        async def scrape_fn(url):
-            return await self._scrape_url(url)
-
-        return await self.batch_processor.process_batch(urls, scrape_fn)
-
-    async def _scrape_url(self, url: str) -> Dict[str, Any]:
-        """Scrape a single URL"""
-        scraper_client = self.mcp_registry.get("scraper")
-        if not scraper_client:
-            return {"url": url, "content": "", "error": "No scraper available"}
-
-        try:
-            result = await scraper_client.call_tool("scrape", {"url": url})
-            return result
-        except Exception as e:
-            return {"url": url, "content": "", "error": str(e)}
-
-    async def prefetch_common_queries(self, queries: List[str]):
-        """Prefetch and cache common queries"""
-        if not self.enable_cache:
-            return
-
-        tasks = [self.search_with_cache(query) for query in queries]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
 class SelfOptimizingAgent(ResearchAgent):
     """Agent that examines its memories to develop improved research methods.
 
-    The primary workflow (``self_optimize``) follows five phases:
+    The primary workflow (``self_optimize``) follows six phases:
       1. Read the current RESEARCH-METHODS.md as baseline context.
       2. Retrieve all stored memories from the memory MCP server.
       3. Analyse the memories (with the current methods as context) to surface
@@ -191,6 +29,9 @@ class SelfOptimizingAgent(ResearchAgent):
       4. Develop concrete new / updated research method descriptions.
       5. Rewrite RESEARCH-METHODS.md to incorporate the improvements, then
          persist the new methods to the memory server.
+      6. (Conditional) Prune stale or low-value nodes from the knowledge graph
+         — only if a dry-run reveals candidates AND the LLM determines that
+         removal is warranted without sacrificing data quality.
 
     Each phase emits an ``optimize_progress`` WebSocket event so the frontend
     can track progress in the graph view.  The final event is
@@ -327,6 +168,90 @@ class SelfOptimizingAgent(ResearchAgent):
             )
             return []
 
+    async def _assess_pruning_need(
+        self,
+        graph_stats: Dict[str, int],
+        dry_run_results: Dict[str, int],
+        insights: str,
+    ) -> Dict[str, Any]:
+        """Ask the LLM whether pruning the knowledge graph is warranted.
+
+        Returns a dict with keys:
+          - ``should_prune`` (bool): whether to proceed with actual pruning.
+          - ``min_confidence`` (float): confidence threshold, clamped to [0.05, 0.5].
+          - ``max_age_days`` (int): age threshold, clamped to [30, 365].
+          - ``reasoning`` (str): brief justification.
+
+        On any parse / LLM failure defaults to no-prune (safety-first).
+        """
+        _no_prune: Dict[str, Any] = {
+            "should_prune": False,
+            "min_confidence": 0.1,
+            "max_age_days": 180,
+            "reasoning": "Defaulting to no-prune due to assessment error.",
+        }
+
+        system_prompt = (
+            "You are a knowledge-graph curator for a research agent. "
+            "Your job is to decide whether the agent's knowledge graph should "
+            "be pruned of stale or low-value data.\n\n"
+            "You will receive:\n"
+            "  1. Current graph statistics (entity/relationship counts).\n"
+            "  2. A dry-run report: how many relationships, entities, dangling "
+            "contradiction edges, and orphaned claims WOULD be removed under "
+            "default thresholds (min_confidence=0.1, max_age_days=180).\n"
+            "  3. Insights from the latest research-session analysis.\n\n"
+            "Guiding principles:\n"
+            "  • Be CONSERVATIVE. The graph is a long-term asset. Only recommend "
+            "pruning when the candidates are clearly low-value noise.\n"
+            "  • Consider the ratio of pruneable items to total graph size. "
+            "If the dry-run would remove >30% of any category, be skeptical.\n"
+            "  • If the graph is small (< 20 entities) prefer to keep everything.\n"
+            "  • You may suggest tighter thresholds than the defaults to be safer "
+            "(e.g. higher min_confidence or shorter max_age_days).\n"
+            "  • If in doubt, do NOT prune.\n\n"
+            "Return ONLY valid JSON with exactly these keys:\n"
+            '{"should_prune": <bool>, "min_confidence": <float 0.05-0.5>, '
+            '"max_age_days": <int 30-365>, "reasoning": "<one sentence>"}'
+        )
+        total_pruneable = sum(dry_run_results.values())
+        user_prompt = (
+            f"## Graph statistics\n{json.dumps(graph_stats, indent=2)}\n\n"
+            f"## Dry-run pruning candidates\n{json.dumps(dry_run_results, indent=2)}\n"
+            f"(Total pruneable items: {total_pruneable})\n\n"
+            f"## Latest research-session insights\n{insights[:1000]}"
+        )
+
+        try:
+            model = self._select_model_for_step("assess pruning need")
+            messages = [
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_prompt),
+            ]
+            response = await self.model.generate(model, messages)
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            decision = json.loads(content)
+            # Validate and clamp thresholds to safe bounds
+            should_prune = bool(decision.get("should_prune", False))
+            min_confidence = float(decision.get("min_confidence", 0.1))
+            max_age_days = int(decision.get("max_age_days", 180))
+            min_confidence = max(0.05, min(0.5, min_confidence))
+            max_age_days = max(30, min(365, max_age_days))
+            return {
+                "should_prune": should_prune,
+                "min_confidence": min_confidence,
+                "max_age_days": max_age_days,
+                "reasoning": str(decision.get("reasoning", "")),
+            }
+        except Exception as exc:
+            logger.warning(
+                "[SelfOptimizingAgent] Pruning assessment failed (%s) — defaulting to no-prune.",
+                exc,
+            )
+            return _no_prune
+
     async def _generate_updated_methods_doc(
         self,
         current_methods: str,
@@ -435,10 +360,10 @@ class SelfOptimizingAgent(ResearchAgent):
             data={"phase": "retrieve_memories", "status": "completed"},
         )
 
-        # ── Phase 3: analyse patterns ─────────────────────────────────────────
+        # ── Phase 3: analyze patterns ─────────────────────────────────────────
         yield ResponseMessage(
             type="optimize_progress",
-            message="Analysing patterns and identifying improvement opportunities…",
+            message="Analyzing patterns and identifying improvement opportunities…",
             data={"phase": "analyze", "status": "running"},
         )
         insights = await self._analyze_memories(all_memories, current_methods)
@@ -525,6 +450,103 @@ class SelfOptimizingAgent(ResearchAgent):
             data={"phase": "update_methods", "status": "completed"},
         )
 
+        # ── Phase 6: prune knowledge graph (conditional) ──────────────────────
+        prune_results: Dict[str, Any] = {"skipped": True}
+        graph = (
+            self._long_term_memory.graph
+            if self._long_term_memory and self._long_term_memory._available
+            else None
+        )
+        if graph is None or not graph.available:
+            yield ResponseMessage(
+                type="optimize_progress",
+                message="Knowledge graph unavailable — pruning phase skipped.",
+                data={"phase": "prune_graph", "status": "skipped"},
+            )
+        else:
+            yield ResponseMessage(
+                type="optimize_progress",
+                message="Surveying knowledge graph for stale or low-value data…",
+                data={"phase": "prune_graph", "status": "running"},
+            )
+            try:
+                graph_stats = await graph.stats()
+                dry_run = await graph.prune(
+                    min_confidence=0.1, max_age_days=180, dry_run=True
+                )
+                total_pruneable = sum(dry_run.values())
+
+                if total_pruneable == 0:
+                    prune_results = {
+                        "skipped": False,
+                        "pruned": False,
+                        "reason": "No stale data detected.",
+                    }
+                    yield ResponseMessage(
+                        type="optimize_progress",
+                        message="Knowledge graph is clean — no stale data detected.",
+                        data={
+                            "phase": "prune_graph",
+                            "status": "completed",
+                            **prune_results,
+                        },
+                    )
+                else:
+                    decision = await self._assess_pruning_need(
+                        graph_stats, dry_run, insights
+                    )
+                    if not decision["should_prune"]:
+                        prune_results = {
+                            "skipped": False,
+                            "pruned": False,
+                            "reason": decision["reasoning"],
+                            "dry_run_candidates": dry_run,
+                        }
+                        yield ResponseMessage(
+                            type="optimize_progress",
+                            message=f"Pruning deferred: {decision['reasoning']}",
+                            data={
+                                "phase": "prune_graph",
+                                "status": "completed",
+                                **prune_results,
+                            },
+                        )
+                    else:
+                        actual = await graph.prune(
+                            min_confidence=decision["min_confidence"],
+                            max_age_days=decision["max_age_days"],
+                            dry_run=False,
+                        )
+                        prune_results = {
+                            "skipped": False,
+                            "pruned": True,
+                            "removed": actual,
+                            "reasoning": decision["reasoning"],
+                        }
+                        removed_total = sum(actual.values())
+                        yield ResponseMessage(
+                            type="optimize_progress",
+                            message=(
+                                f"Knowledge graph pruned: {removed_total} item(s) removed "
+                                f"(relationships={actual.get('relationships', 0)}, "
+                                f"entities={actual.get('entities', 0)}, "
+                                f"claims={actual.get('claims', 0)})."
+                            ),
+                            data={
+                                "phase": "prune_graph",
+                                "status": "completed",
+                                **prune_results,
+                            },
+                        )
+            except Exception as exc:
+                logger.error("[SelfOptimizingAgent] Pruning phase failed: %s", exc)
+                prune_results = {"skipped": False, "pruned": False, "error": str(exc)}
+                yield ResponseMessage(
+                    type="optimize_progress",
+                    message=f"Pruning phase encountered an error and was skipped: {exc}",
+                    data={"phase": "prune_graph", "status": "failed"},
+                )
+
         yield ResponseMessage(
             type="optimize_complete",
             message=(
@@ -534,6 +556,7 @@ class SelfOptimizingAgent(ResearchAgent):
             data={
                 "new_methods_count": len(new_methods),
                 "updated_methods": updated_doc,
+                "prune_results": prune_results,
             },
         )
 

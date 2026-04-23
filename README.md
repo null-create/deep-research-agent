@@ -122,11 +122,10 @@ SEARCH_BACKEND=duckduckgo            # duckduckgo | brave | serper | google
 # GRAPH_COMMUNITY_MIN_MUTATIONS=3   # min new entities+rels before community re-detection runs
 
 # ── Tuning (optional — defaults shown) ───────────────────────
-# MAX_ITERATIONS=3
+# MAX_ITERATIONS=5
 # MAX_SOURCES_PER_QUERY=5
 # MAX_WORKERS=10
 # MAX_CONCURRENT_SESSIONS=10         # max concurrent research sessions (0 = unlimited)
-# RESEARCH_DEPTH=shallow              # shallow | moderate | deep
 # ENABLE_PARALLEL_EXECUTION=true
 # EMBEDDINGS_ENABLED=true
 # EMBEDDINGS_MODEL=all-MiniLM-L6-v2
@@ -156,10 +155,6 @@ Long-term memory is handled in-process by `backend/long_term_memory.py`, backed 
 - **Knowledge graph**: typed nodes (`:Entity`, `:Community`, `:Source`) and edges (`:RELATES_TO`, `:IS_A`, `:CONTRADICTS`, `:SOURCED_FROM`, `:MEMBER_OF`). Features: relationship deduplication with merge-on-conflict, temporal tracking, hierarchy traversal, contradiction detection, URL-level provenance, cross-session path finding, confidence decay, and graph pruning. Nine REST endpoints under `/graph/` expose the graph for external inspection and maintenance.
 
 There is no separate memory MCP server.
-
-## Infrastructure
-
-Terraform IaC for Azure Container Apps is under `infra/azure/`. It provisions 5 Container Apps (backend + 3 MCP servers + frontend), ACR with managed identity, Azure File Shares for file handler data, and Log Analytics. The backend requires a Neo4j instance (provisioned via the `neo4j` Docker Compose service locally). See [infra/azure/README.md](infra/azure/README.md) for deployment instructions.
 
 ## AI Coding Assistant
 
@@ -193,7 +188,6 @@ cd backend && python test_e2e.py
 |-----|----------|
 | [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) | Five-agent pipeline, RAG, concurrency model, multi-pass synthesis |
 | [docs/API_SERVER.md](docs/API_SERVER.md) | WebSocket protocol, REST endpoints, all env vars |
-| [docs/RESEARCH_AGENT.md](docs/RESEARCH_AGENT.md) | Agent base class, plan generation, step execution |
 | [docs/MCP_SERVERS.md](docs/MCP_SERVERS.md) | MCP server setup, tools, and ports |
 | [docs/CLI.md](docs/CLI.md) | CLI and TUI usage |
 | [docs/RAG_NOTES.md](docs/RAG_NOTES.md) | SearchResultStore, embeddings, multi-pass synthesis |

@@ -14,7 +14,6 @@ chroma_data/
 data/
 src/
 mcp/
-infra/
 scripts/
 
 # Python virtual environments and caches

@@ -219,6 +219,8 @@ Structural (non-factual) relationship labels:
 
 When upserting an entity, the graph embeds the new entity's `name: description` and queries for existing entities with cosine similarity ≥ `_ENTITY_DEDUP_THRESHOLD` (0.92). On match: `mention_count` is incremented, `session_id` is appended, and the longer description is kept. On miss: a new entity is created.
 
+If the match is under a **different entity type**, a type-specificity ranking decides which label wins: `Person > Organization > Technology > Event > Location > Metric > Concept`. When the new type is more specific, the node's label is upgraded (`REMOVE old_label SET new_label`) and `entity_type` is updated accordingly. Less-specific new types are silently discarded.
+
 ### Graph Extraction (Write Path)
 
 After each analyst step completes its QA loop, `Orchestrator._extract_graph_triples()` makes **one LLM call** to extract structured entities, relationships, and claims from the step's vetted findings:
@@ -235,6 +237,8 @@ Analyst claims (QA-vetted)
        ├── For each entity  → graph.upsert_entity(name, type, properties)
        │     └── If parent_type provided → graph.upsert_entity(parent) + graph.store_hierarchy()
        ├── For each relationship → graph.store_relationship(source, target, label)
+       │     ├── Dedup: identical (source, target, relation_type, label) edges are merged —
+       │     │         confidence raised to the higher value, evidence appended, confirmation_count++
        │     └── If source_url provided → graph.store_document() + graph.link_document_to_entity()
        └── For each claim → graph.store_claim(text, confidence, entity_names)
 ```
@@ -247,13 +251,15 @@ Only QA-vetted claims are extracted — raw search results are never fed to the 
 
 `Orchestrator._recall_memories(query, limit=N)` combines two sources. It is called in two places: during `plan()` with `limit=5` (default) and during `synthesize()` Phase B with `limit=8`.
 
-1. **Graph-aware recall** via `graph.recall_graph_context(query, entity_limit=5, max_hops=2)`:
-   - Vector-search entities relevant to the query (top 5) across all typed entity indexes
-   - Traverse up to 2 hops of typed relationships from seed entities
+1. **Graph-aware recall** via `graph.recall_graph_context(query, entity_limit=<dynamic>, max_hops=2, min_confidence=0.3, include_contradictions=True)`:
+   - The `entity_limit` is computed dynamically as `min(15, max(5, entity_count // 20))` so that larger graphs surface more context without overloading small or empty graphs
+   - Vector-search entities relevant to the query (across all typed entity indexes using UNION ALL)
+   - Traverse up to 2 hops of typed relationships from seed entities, filtering out edges with confidence < 0.3
    - Retrieve claims linked to seed entities
    - Retrieve community summaries for overlapping entity clusters
-   - Format as structured text (`KNOWN ENTITIES`, `KNOWN RELATIONSHIPS`, `CLAIMS`, `THEMATIC CLUSTERS`)
-   - Optionally include `KNOWN CONTRADICTIONS` and `SOURCE DOCUMENTS`
+   - Always includes `KNOWN CONTRADICTIONS` (passed at every call site)
+   - Format as structured text (`KNOWN ENTITIES`, `KNOWN RELATIONSHIPS`, `CLAIMS`, `THEMATIC CLUSTERS`, `KNOWN CONTRADICTIONS`)
+   - `SOURCE DOCUMENTS` optionally included when `include_provenance=True` or `include_documents=True`
 
 2. **Flat vector search** via `find_similar(query, limit=N, min_similarity=0.5)`:
    - Cosine rank over the flat memory collection

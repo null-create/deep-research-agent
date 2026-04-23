@@ -28,15 +28,6 @@ backend/logs/sessions/*.ndjson
 backend/logs/sessions/*.ndjson.*
 backend/logs/sessions/*.json
 
-# Terraform — never commit secrets or generated state/cache files
-infra/azure/terraform.tfvars
-infra/azure/backend.conf
-infra/azure/.terraform/
-infra/azure/.terraform.lock.hcl
-infra/azure/terraform.tfstate
-infra/azure/terraform.tfstate.backup
-infra/azure/*.tfplan
-
 # Generated reports and retrieved docs
 data/reports/*
 data/benchmarks/*

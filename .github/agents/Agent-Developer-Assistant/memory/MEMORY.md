@@ -1,5 +1,14 @@
 # Agent Memory — Research Assistant
 
+## 2026-04-23 (Legacy research_agent.py / advanced_features.py cleanup)
+
+- **Dead code removed:** Only 3 members of `ResearchAgent` are reachable from live code: `__init__`, `chat()`, `_select_model_for_step()`. The entire plan/execute/synthesize pipeline (~750 lines) was dead code — fully replaced by `orchestrator.py`. All removed cleanly.
+- **Files reduced:** `research_agent.py` 960→143 lines; `advanced_features.py` ~300→25 lines; `optimization.py` ~180 lines of dead classes removed.
+- **AdvancedResearchAgent:** Now a thin passthrough subclass with only `__init__`. All its methods (`_execute_step_parallel`, `_assess_source_credibility`, `_deep_scrape`, `_filter_relevant_links`, `_cross_reference_sources`, `_generate_follow_up_questions`) were dead — Orchestrator supersedes all of them.
+- **optimization.py:** `AsyncCache`, `BatchProcessor`, `OptimizedResearchAgent` were dead utility classes — removed. `import` of `Message` from `research_agent` fixed to come from `model_backend` directly.
+- **api_server.py unchanged:** The import chain is `api_server → advanced_features → research_agent` — preserved. `/chat` endpoint still calls `agent.chat()`; `/mcp/tools` still uses `agent.mcp_servers`.
+- **All 122 unit tests pass** after cleanup.
+
 ## 2026-04-22 (Session resume after hard page refresh)
 
 - **Root cause:** `activeSessionIdRef` and `researchConvIdRef` are in-memory `useRef`s — lost on hard refresh. `handleReconnected` was only called on WebSocket re-connections, not on the initial connection after a refresh. Backend fully supports replay but frontend never sent the `resume` message on initial connect.
