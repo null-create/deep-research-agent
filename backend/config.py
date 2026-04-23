@@ -319,8 +319,11 @@ class Config(BaseModel):
     )
 
     # ── AWS Bedrock ──
-    # Uses the OpenAI-compatible gateway endpoint (not boto3).  Requires
-    # AWS_BASE_URL (gateway URL) and AWS_API_KEY (gateway token).
+    # Two backends are available:
+    #   "aws"     – OpenAI-compatible gateway (requires AWS_BASE_URL + AWS_API_KEY)
+    #   "bedrock" – Native boto3 bedrock-runtime (requires AWS_REGION; credentials
+    #               are resolved via the standard boto3 chain: env vars,
+    #               ~/.aws/credentials, IAM instance role, etc.)
 
     # Default Bedrock model identifier.
     aws_model: str = Field(
@@ -346,6 +349,10 @@ class Config(BaseModel):
     )
     # API key / token for the Bedrock gateway.
     aws_api_key: Optional[str] = Field(default_factory=lambda: os.getenv("AWS_API_KEY"))
+    # AWS region for native boto3 Bedrock access (MODEL_BACKEND=bedrock).
+    aws_region: str = Field(
+        default_factory=lambda: os.getenv("AWS_REGION", "us-east-1")
+    )
 
     # ── GCP Vertex AI ──
 
@@ -407,6 +414,30 @@ class Config(BaseModel):
     # API token for HuggingFace Inference Endpoints (optional for local TGI).
     huggingface_api_key: Optional[str] = Field(
         default_factory=lambda: os.getenv("HUGGINGFACE_API_KEY")
+    )
+
+    # ── Anthropic ──
+    # Direct Anthropic API (claude-* models).  Uses anthropic[aiohttp] SDK.
+
+    # API key for the Anthropic platform.  Required when model_backend="anthropic".
+    anthropic_api_key: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY")
+    )
+    # Optional custom base URL (e.g. for proxies).  Defaults to the official API.
+    anthropic_base_url: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_BASE_URL") or None
+    )
+    # Default model identifier.
+    anthropic_model: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-opus-4-7")
+    )
+    # Model used for heavy tasks (planning, synthesis, report generation).
+    anthropic_heavy_model: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_HEAVY_MODEL", "claude-opus-4-7")
+    )
+    # Model used for light tasks (search execution, analyst extraction).
+    anthropic_light_model: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_LIGHT_MODEL", "claude-haiku-4-5")
     )
 
     # ───────── Per-agent model overrides

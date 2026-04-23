@@ -17,7 +17,7 @@ from model_backend import (
     OpenAIBackend,
     OllamaBackend,
     AzureOpenAIBackend,
-    BedrockBackend,
+    AWSOpenAIBackend,
     GCPVertexAIBackend,
     HuggingFaceBackend,
 )
@@ -445,7 +445,7 @@ class ResearchAgent:
                 return "gpt-5.2"
             elif isinstance(self.model, AzureOpenAIBackend):
                 return "gpt-5.2"
-            elif isinstance(self.model, BedrockBackend):
+            elif isinstance(self.model, AWSOpenAIBackend):
                 return "global.anthropic.claude-sonnet-4-6"
             elif isinstance(self.model, GCPVertexAIBackend):
                 return "gemini-2.5-pro"
@@ -473,7 +473,7 @@ class ResearchAgent:
                 return "gpt-5-nano"
             elif isinstance(self.model, AzureOpenAIBackend):
                 return "gpt-5-nano"
-            elif isinstance(self.model, BedrockBackend):
+            elif isinstance(self.model, AWSOpenAIBackend):
                 return "global.anthropic.claude-haiku-4-5-20251001-v1:0"
             elif isinstance(self.model, GCPVertexAIBackend):
                 return "gemini-2.5-nano"
@@ -493,7 +493,7 @@ class ResearchAgent:
                 return "gpt-5-nano"
             elif isinstance(self.model, AzureOpenAIBackend):
                 return "gpt-5-nano"
-            elif isinstance(self.model, BedrockBackend):
+            elif isinstance(self.model, AWSOpenAIBackend):
                 return "global.anthropic.claude-haiku-4-5-20251001-v1:0"
             elif isinstance(self.model, GCPVertexAIBackend):
                 return "gemini-2.5-nano"
@@ -509,7 +509,7 @@ class ResearchAgent:
             return "gpt-5.2"
         elif isinstance(self.model, AzureOpenAIBackend):
             return "gpt-5.2"
-        elif isinstance(self.model, BedrockBackend):
+        elif isinstance(self.model, AWSOpenAIBackend):
             return "global.anthropic.claude-sonnet-4-6"
         elif isinstance(self.model, GCPVertexAIBackend):
             return "gemini-2.5-pro"

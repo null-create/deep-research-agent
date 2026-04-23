@@ -10,7 +10,9 @@ const BACKENDS: { value: Backend; label: string }[] = [
   { value: 'ollama', label: 'Ollama (local)' },
   { value: 'openai', label: 'OpenAI' },
   { value: 'azure', label: 'Azure OpenAI' },
-  { value: 'aws', label: 'AWS Bedrock' },
+  { value: 'aws', label: 'AWS (OpenAI-compatible gateway)' },
+  { value: 'bedrock', label: 'AWS Bedrock (boto3 native)' },
+  { value: 'anthropic', label: 'Anthropic' },
   { value: 'gcp', label: 'GCP Vertex AI' },
   { value: 'huggingface', label: 'HuggingFace' },
 ];
@@ -20,6 +22,8 @@ const BACKEND_URL_PLACEHOLDERS: Record<Backend, string> = {
   openai: 'https://api.openai.com/v1',
   azure: 'https://<resource>.openai.azure.com',
   aws: 'https://bedrock-runtime.<region>.amazonaws.com',
+  bedrock: 'us-east-1',
+  anthropic: 'https://api.anthropic.com (optional)',
   gcp: 'https://us-central1-aiplatform.googleapis.com/v1',
   huggingface: 'http://localhost:8080',
 };
@@ -28,26 +32,33 @@ const BACKEND_URL_LABELS: Record<Backend, string> = {
   ollama: 'Base URL',
   openai: 'API Base URL',
   azure: 'Azure Endpoint',
-  aws: 'Bedrock Base URL (optional)',
+  aws: 'Gateway Base URL (optional)',
+  bedrock: 'AWS Region',
+  anthropic: 'Base URL (optional)',
   gcp: 'Vertex AI Endpoint',
   huggingface: 'Base URL',
 };
 
-const BACKENDS_WITHOUT_KEY: Backend[] = ['ollama'];
+// bedrock uses the boto3 credential chain (env vars / ~/.aws / IAM role) — no key field needed
+const BACKENDS_WITHOUT_KEY: Backend[] = ['ollama', 'bedrock'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function extractFormState(cfg: Record<string, unknown>, backend: Backend): FormState {
   const baseModelKey = `${backend}_heavy_model` as string;
   const lightModelKey = `${backend}_light_model` as string;
-  const urlKey = backend === 'azure' ? 'azure_endpoint' : `${backend}_base_url`;
+  const urlKey =
+    backend === 'azure' ? 'azure_endpoint' :
+      backend === 'bedrock' ? 'aws_region' :
+        `${backend}_base_url`;
   const keyKey =
     backend === 'openai' ? 'openai_api_key' :
       backend === 'azure' ? 'azure_api_key' :
         backend === 'aws' ? 'aws_api_key' :
           backend === 'gcp' ? 'gcp_api_key' :
             backend === 'huggingface' ? 'huggingface_api_key' :
-              null;
+              backend === 'anthropic' ? 'anthropic_api_key' :
+                null; // bedrock: no key — uses boto3 credential chain
 
   const heavyModel = (cfg[baseModelKey] as string) || '';
   const lightModel = (cfg[lightModelKey] as string) || '';

@@ -1,5 +1,5 @@
 aiohttp
-anthropic
+anthropic[aiohttp]
 anyio
 art
 asyncio

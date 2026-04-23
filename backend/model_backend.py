@@ -1,9 +1,12 @@
+import asyncio
 import os
-import aiohttp
 import json
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncIterator
 
+import boto3
+from anthropic import AsyncAnthropic, DefaultAioHttpClient
+from huggingface_hub import AsyncInferenceClient
 from ollama import AsyncClient as OllamaAsyncClient
 from openai import AsyncOpenAI, AsyncAzureOpenAI
 
@@ -226,8 +229,8 @@ class AzureOpenAIBackend(ModelBackend):
             raise RuntimeError(f"Azure OpenAI API streaming error: {str(e)}")
 
 
-class BedrockBackend(ModelBackend):
-    """AWS Bedrock backend"""
+class AWSOpenAIBackend(ModelBackend):
+    """AWS OpenAI Compatible backend"""
 
     def __init__(
         self,
@@ -253,24 +256,24 @@ class BedrockBackend(ModelBackend):
     ) -> ModelResponse:
         try:
             logger.debug(
-                "Generating response with BedrockBackend: model=%s, messages=%s, tools=%s",
+                "Generating response with AWSOpenAIBackend: model=%s, messages=%s, tools=%s",
                 model or self.model,
                 messages,
                 tools if tools else [],
             )
 
-            # Bedrock expects tools in a specific format, so we need to convert our internal ToolCall objects to
-            # the format expected by Bedrock
+            # AWS OpenAI expects tools in a specific format, so we need to convert our internal ToolCall objects to
+            # the format expected by AWS OpenAI
             tool_calls = format_tool_calls(tools or [])
 
-            # Call the Bedrock API using the OpenAI-compatible client
+            # Call the AWS OpenAI API using the OpenAI-compatible client
             response = await self.client.chat.completions.create(
                 model=model if model else self.model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
                 max_tokens=max_tokens,
                 tools=tool_calls,
                 tool_choice="auto" if tools else "none",
-                # temperature=temperature, # Bedrock may not support temperature for all models
+                # temperature=temperature, # AWS OpenAI may not support temperature for all models
             )
             content = response.choices[0].message.content
             if not content:
@@ -301,7 +304,7 @@ class BedrockBackend(ModelBackend):
                 finish_reason=response.choices[0].finish_reason,
             )
         except Exception as e:
-            logger.exception("Error in BedrockBackend.generate: %s", str(e))
+            logger.exception("Error in AWSOpenAIBackend.generate: %s", str(e))
             return ModelResponse(content="", tool_calls=None, finish_reason="error")
 
     async def stream_generate(
@@ -321,6 +324,152 @@ class BedrockBackend(ModelBackend):
             async for event in response:
                 if event.choices and event.choices[0].delta.content:
                     yield event.choices[0].delta.content
+        except Exception as e:
+            logger.exception("Error in AWSOpenAIBackend.stream_generate: %s", str(e))
+            yield ""
+            return
+
+
+class BedrockBackend(ModelBackend):
+    """AWS Bedrock backend using native boto3 bedrock-runtime (converse API).
+
+    Credentials are resolved via the standard boto3 chain:
+    environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+    AWS_SESSION_TOKEN), ~/.aws/credentials, or an attached IAM role.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        region: str = "us-east-1",
+        default_headers: Optional[Dict[str, str]] = None,
+    ):
+        self.model = model
+        self.bedrock_client = boto3.client("bedrock-runtime", region_name=region)
+
+    def _convert_messages(self, messages: List[Message]) -> tuple[list, list]:
+        """Split system messages into a separate list; format the rest for Converse API."""
+        system = []
+        converse_messages = []
+        for m in messages:
+            if m.role == "system":
+                system.append({"text": m.content})
+            else:
+                converse_messages.append(
+                    {"role": m.role, "content": [{"text": m.content}]}
+                )
+        return system, converse_messages
+
+    def _convert_tools(self, tools: Optional[List[Dict]]) -> Optional[Dict]:
+        """Convert internal tool dicts to Bedrock Converse toolConfig format."""
+        if not tools:
+            return None
+        tool_specs = []
+        for t in tools:
+            func = t.get("function", t)
+            tool_specs.append(
+                {
+                    "toolSpec": {
+                        "name": func.get("name", ""),
+                        "description": func.get("description", ""),
+                        "inputSchema": {"json": func.get("parameters", {})},
+                    }
+                }
+            )
+        return {"tools": tool_specs}
+
+    async def generate(
+        self,
+        model: Optional[str],
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+        max_tokens: int = MAX_TOKENS,
+        temperature: float = TEMPERATURE,
+    ) -> ModelResponse:
+        try:
+            system, converse_messages = self._convert_messages(messages)
+            tool_config = self._convert_tools(tools)
+
+            logger.debug(
+                "Generating response with BedrockBackend: model=%s, tools=%s",
+                model or self.model,
+                [t.get("function", t).get("name") for t in tools] if tools else [],
+            )
+
+            kwargs: Dict[str, Any] = {
+                "modelId": model or self.model,
+                "messages": converse_messages,
+                "inferenceConfig": {
+                    "maxTokens": max_tokens,
+                    "temperature": temperature,
+                },
+            }
+            if system:
+                kwargs["system"] = system
+            if tool_config:
+                kwargs["toolConfig"] = tool_config
+
+            response = await asyncio.to_thread(self.bedrock_client.converse, **kwargs)
+
+            content_blocks = response["output"]["message"]["content"]
+            text = ""
+            tool_calls = []
+            for block in content_blocks:
+                if "text" in block:
+                    text += block["text"]
+                elif "toolUse" in block:
+                    tc = block["toolUse"]
+                    tool_calls.append(
+                        ToolCall(
+                            name=tc["name"],
+                            description="",
+                            parameters=tc.get("input", {}),
+                        )
+                    )
+
+            stop_reason = response.get("stopReason", "end_turn")
+            finish_reason = "stop" if stop_reason == "end_turn" else stop_reason
+
+            return ModelResponse(
+                content=text,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            logger.exception("Error in BedrockBackend.generate: %s", str(e))
+            return ModelResponse(content="", tool_calls=None, finish_reason="error")
+
+    async def stream_generate(
+        self,
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+    ) -> AsyncIterator[str]:
+        try:
+            system, converse_messages = self._convert_messages(messages)
+            tool_config = self._convert_tools(tools)
+
+            kwargs: Dict[str, Any] = {
+                "modelId": self.model,
+                "messages": converse_messages,
+            }
+            if system:
+                kwargs["system"] = system
+            if tool_config:
+                kwargs["toolConfig"] = tool_config
+
+            def _collect_chunks() -> list[str]:
+                chunks: list[str] = []
+                resp = self.bedrock_client.converse_stream(**kwargs)
+                for event in resp["stream"]:
+                    if "contentBlockDelta" in event:
+                        delta = event["contentBlockDelta"].get("delta", {})
+                        if "text" in delta:
+                            chunks.append(delta["text"])
+                return chunks
+
+            chunks = await asyncio.to_thread(_collect_chunks)
+            for chunk in chunks:
+                yield chunk
         except Exception as e:
             logger.exception("Error in BedrockBackend.stream_generate: %s", str(e))
             yield ""
@@ -422,6 +571,146 @@ class GCPVertexAIBackend(ModelBackend):
             return
 
 
+class AnthropicBackend(ModelBackend):
+    """Anthropic backend using the official SDK with aiohttp for improved async performance."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: Optional[str] = None,
+        default_headers: Optional[Dict[str, str]] = None,
+    ):
+        self.model = model
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "http_client": DefaultAioHttpClient(),
+            "default_headers": default_headers or DEFAULT_HEADERS,
+        }
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = AsyncAnthropic(**client_kwargs)
+
+    def _split_messages(self, messages: List[Message]) -> tuple[str, list]:
+        """Extract system prompt and format remaining messages for Anthropic."""
+        system_parts = []
+        formatted = []
+        for m in messages:
+            if m.role == "system":
+                system_parts.append(m.content)
+            else:
+                formatted.append({"role": m.role, "content": m.content})
+        return "\n".join(system_parts), formatted
+
+    def _convert_tools(self, tools: Optional[List[Dict]]) -> list:
+        """Convert internal tool dicts to Anthropic tool format."""
+        if not tools:
+            return []
+        result = []
+        for t in tools:
+            func = t.get("function", t)
+            result.append(
+                {
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "input_schema": func.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
+                }
+            )
+        return result
+
+    async def generate(
+        self,
+        model: Optional[str],
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+        max_tokens: int = MAX_TOKENS,
+        temperature: float = TEMPERATURE,
+    ) -> ModelResponse:
+        try:
+            system, formatted_messages = self._split_messages(messages)
+            anthropic_tools = self._convert_tools(tools)
+
+            logger.debug(
+                "Generating response with AnthropicBackend: model=%s, tools=%s",
+                model or self.model,
+                [t["name"] for t in anthropic_tools] if anthropic_tools else [],
+            )
+
+            kwargs: Dict[str, Any] = {
+                "model": model or self.model,
+                "messages": formatted_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if system:
+                kwargs["system"] = system
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+                kwargs["tool_choice"] = {"type": "auto"}
+
+            response = await self.client.messages.create(**kwargs)
+
+            text = ""
+            tool_calls = []
+            for block in response.content:
+                if block.type == "text":
+                    text += block.text
+                elif block.type == "tool_use":
+                    tool_calls.append(
+                        ToolCall(
+                            name=block.name,
+                            description="tool_use",
+                            parameters=(
+                                block.input if isinstance(block.input, dict) else {}
+                            ),
+                        )
+                    )
+
+            finish_reason = (
+                "stop"
+                if response.stop_reason == "end_turn"
+                else (response.stop_reason or "stop")
+            )
+            return ModelResponse(
+                content=text,
+                tool_calls=tool_calls if tool_calls else None,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            logger.exception("Error in AnthropicBackend.generate: %s", str(e))
+            return ModelResponse(content="", tool_calls=None, finish_reason="error")
+
+    async def stream_generate(
+        self,
+        messages: List[Message],
+        tools: Optional[List[Dict]] = None,
+    ) -> AsyncIterator[str]:
+        try:
+            system, formatted_messages = self._split_messages(messages)
+            anthropic_tools = self._convert_tools(tools)
+
+            kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": formatted_messages,
+                "max_tokens": MAX_TOKENS,
+            }
+            if system:
+                kwargs["system"] = system
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+                kwargs["tool_choice"] = {"type": "auto"}
+
+            async with self.client.messages.stream(**kwargs) as stream:
+                async for text in stream.text_stream:
+                    yield text
+        except Exception as e:
+            logger.exception("Error in AnthropicBackend.stream_generate: %s", str(e))
+            yield ""
+            return
+
+
 class OllamaBackend(ModelBackend):
     def __init__(
         self,
@@ -499,58 +788,57 @@ class OllamaBackend(ModelBackend):
 
 
 class HuggingFaceBackend(ModelBackend):
-    """For self-hosted HuggingFace models with text-generation-inference or similar"""
+    """HuggingFace Inference backend using the official huggingface_hub SDK."""
 
-    def __init__(self, base_url: str, model: str = None):
-        self.base_url = base_url
+    def __init__(self, base_url: str, model: str = None, api_key: Optional[str] = None):
         self.model = model
+        self.client = AsyncInferenceClient(
+            model=model,
+            token=api_key,
+            base_url=base_url,
+            headers=DEFAULT_HEADERS,
+        )
 
     async def generate(
         self,
         model: Optional[str],
         messages: List[Message],
         tools: Optional[List[Dict]] = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
+        max_tokens: int = MAX_TOKENS,
+        temperature: float = TEMPERATURE,
     ) -> ModelResponse:
-        # Convert messages to prompt format
-        prompt = self._messages_to_prompt(messages)
-
-        payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": max_tokens,
-                "return_full_text": False,
-                "temperature": temperature,
-            },
-        }
-
+        active_model = model or self.model
         logger.debug(
             "Generating response with HuggingFaceBackend: model=%s, messages=%s, tools=%s",
-            model or self.model,
+            active_model,
             messages,
             tools if tools else [],
         )
-
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/generate", json=payload
-                ) as response:
-                    result = await response.json()
-                    response.raise_for_status()
-                    content = (
-                        result[0]["generated_text"]
-                        if isinstance(result, list)
-                        else result["generated_text"]
+            response = await self.client.chat.completions.create(
+                model=active_model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                tools=tools if tools else [],
+                tool_choice="auto" if tools else "none",
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            message = response.choices[0].message
+            tool_calls = []
+            if message.tool_calls:
+                tool_calls = [
+                    ToolCall(
+                        name=tc.function.name,
+                        description="",
+                        parameters=json.loads(tc.function.arguments or "{}"),
                     )
-
-                    # Parse tool calls from structured output if present
-                    tool_calls = self._parse_tool_calls(content) if tools else None
-
-                    return ModelResponse(
-                        content=content, tool_calls=tool_calls, finish_reason="stop"
-                    )
+                    for tc in message.tool_calls
+                ]
+            return ModelResponse(
+                content=message.content or "",
+                tool_calls=tool_calls or None,
+                finish_reason=response.choices[0].finish_reason or "stop",
+            )
         except Exception as e:
             logger.exception("Error in HuggingFaceBackend.generate: %s", str(e))
             return ModelResponse(content="", tool_calls=None, finish_reason="error")
@@ -560,59 +848,19 @@ class HuggingFaceBackend(ModelBackend):
         messages: List[Message],
         tools: Optional[List[Dict]] = None,
     ) -> AsyncIterator[str]:
-        prompt = self._messages_to_prompt(messages)
-
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 2048},
-            "stream": True,
-        }
-
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/generate_stream", json=payload
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.content:
-                        if line:
-                            data = json.loads(line)
-                            if "token" in data and "text" in data["token"]:
-                                yield data["token"]["text"]
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                stream=True,
+            )
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
         except Exception as e:
             logger.exception("Error in HuggingFaceBackend.stream_generate: %s", str(e))
             yield ""
             return
-
-    @staticmethod
-    def _messages_to_prompt(messages: List[Message]) -> str:
-        """Convert messages to a prompt string - customize based on your model"""
-        prompt = ""
-        for msg in messages:
-            if msg.role == "system":
-                prompt += f"System: {msg.content}\n\n"
-            elif msg.role == "user":
-                prompt += f"User: {msg.content}\n\n"
-            elif msg.role == "assistant":
-                prompt += f"Assistant: {msg.content}\n\n"
-        prompt += "Assistant: "
-        return prompt
-
-    def _parse_tool_calls(self, content: str) -> Optional[List[ToolCall]]:
-        """Parse tool calls from model output - implement based on your prompting strategy"""
-        # This is a simple example - you'd need to implement proper parsing
-        # based on how you prompt the model to use tools
-        try:
-            if "<tool_call>" in content:
-                # Parse structured tool calls from content
-                # This is placeholder logic
-                return None
-        except Exception as e:
-            logger.exception(
-                "Error parsing tool calls from HuggingFace output: %s", str(e)
-            )
-            raise
-        return None
 
 
 def _strip_none_values(obj: Any) -> Any:
@@ -672,10 +920,16 @@ def create_model_backend(config: Config) -> ModelBackend:
         )
 
     elif backend_type == "aws":
-        return BedrockBackend(
+        return AWSOpenAIBackend(
             base_url=config.aws_base_url,
             api_key=config.aws_api_key,
             model=config.aws_model,
+        )
+
+    elif backend_type == "bedrock":
+        return BedrockBackend(
+            model=config.aws_model,
+            region=config.aws_region,
         )
 
     elif backend_type == "azure":
@@ -696,9 +950,18 @@ def create_model_backend(config: Config) -> ModelBackend:
     elif backend_type == "ollama":
         return OllamaBackend(base_url=config.ollama_base_url, model=config.ollama_model)
 
+    elif backend_type == "anthropic":
+        return AnthropicBackend(
+            api_key=config.anthropic_api_key,
+            model=config.anthropic_model,
+            base_url=config.anthropic_base_url or None,
+        )
+
     elif backend_type == "huggingface":
         return HuggingFaceBackend(
-            base_url=config.huggingface_base_url, model=config.huggingface_model
+            base_url=config.huggingface_base_url,
+            model=config.huggingface_model,
+            api_key=config.huggingface_api_key,
         )
 
     else:

@@ -698,6 +698,8 @@ async def update_config(request: Request, config_update: ConfigUpdate):
                 cfg.gcp_api_key = config_update.api_key
             elif backend == "huggingface":
                 cfg.huggingface_api_key = config_update.api_key
+            elif backend == "anthropic":
+                cfg.anthropic_api_key = config_update.api_key
 
         if config_update.api_base_url is not None:
             if backend == "openai":
@@ -712,6 +714,12 @@ async def update_config(request: Request, config_update: ConfigUpdate):
                 cfg.ollama_base_url = config_update.api_base_url
             elif backend == "huggingface":
                 cfg.huggingface_base_url = config_update.api_base_url
+            elif backend == "anthropic":
+                cfg.anthropic_base_url = config_update.api_base_url or None
+            elif backend == "bedrock":
+                cfg.aws_region = (
+                    config_update.api_base_url
+                )  # UI sends region in this field
 
         # ── Apply heavy/light model names ─────────────────────────────────
         if config_update.heavy_model is not None:
@@ -725,6 +733,12 @@ async def update_config(request: Request, config_update: ConfigUpdate):
                 cfg.gcp_heavy_model = config_update.heavy_model
             elif backend == "ollama":
                 cfg.ollama_heavy_model = config_update.heavy_model
+            elif backend == "anthropic":
+                cfg.anthropic_heavy_model = config_update.heavy_model
+            elif backend == "bedrock":
+                cfg.aws_heavy_model = (
+                    config_update.heavy_model
+                )  # bedrock shares aws_* model fields
 
         if config_update.light_model is not None:
             if backend == "openai":
@@ -737,6 +751,12 @@ async def update_config(request: Request, config_update: ConfigUpdate):
                 cfg.gcp_light_model = config_update.light_model
             elif backend == "ollama":
                 cfg.ollama_light_model = config_update.light_model
+            elif backend == "anthropic":
+                cfg.anthropic_light_model = config_update.light_model
+            elif backend == "bedrock":
+                cfg.aws_light_model = (
+                    config_update.light_model
+                )  # bedrock shares aws_* model fields
 
         # ── Apply per-agent model overrides ───────────────────────────────
         for attr in (
@@ -782,6 +802,10 @@ async def update_config(request: Request, config_update: ConfigUpdate):
                 cfg.ollama_model = config_update.model
             elif backend == "huggingface":
                 cfg.huggingface_model = config_update.model
+            elif backend == "anthropic":
+                cfg.anthropic_model = config_update.model
+            elif backend == "bedrock":
+                cfg.aws_model = config_update.model  # bedrock shares aws_* model fields
 
         # ── Persist to disk ───────────────────────────────────────────────
         _persist_settings(cfg)

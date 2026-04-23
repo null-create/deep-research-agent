@@ -15,46 +15,35 @@
    - [Health Checks](#health-checks)
    - [Docker Conventions](#docker-conventions)
    - [Network](#network)
-3. [Long-Term Memory](#long-term-memory-in-process-neo4j-backed)
-   - [Storage Architecture](#storage-architecture)
-   - [Python API](#python-api)
-   - [Knowledge Graph API](#knowledge-graph-api)
-   - [Memory Record Shape](#memory-record-shape)
-   - [Relationship Graph](#relationship-graph)
-   - [Memory Scoring & Ranking](#memory-scoring--ranking)
-   - [Memory Decay](#memory-decay)
-   - [Deduplication](#deduplication)
-   - [Persistence](#persistence)
-   - [Configuration](#configuration-long-term-memory)
-4. [Web Search Server](#web-search-server)
-   - [Purpose](#purpose-2)
+3. [Web Search Server](#web-search-server)
+   - [Purpose](#purpose-web-search)
    - [Search Backends](#search-backends)
    - [Tools](#tools-web-search)
    - [Result Shapes](#result-shapes)
    - [Configuration](#configuration-web-search)
-5. [Web Scraper Server](#web-scraper-server)
-   - [Purpose](#purpose-3)
+4. [Web Scraper Server](#web-scraper-server)
+   - [Purpose](#purpose-web-scraper)
    - [Scraping Pipeline](#scraping-pipeline)
    - [Tools](#tools-web-scraper)
    - [Configuration](#configuration-web-scraper)
-6. [File Handler Server](#file-handler-server)
-   - [Purpose](#purpose-4)
+5. [File Handler Server](#file-handler-server)
+   - [Purpose](#purpose-file-handler)
    - [Tool Modules](#tool-modules)
    - [Tools](#tools-file-handler)
    - [HTTP REST Endpoints](#http-rest-endpoints)
    - [Atomic Writes](#atomic-writes)
-   - [Persistence](#persistence-1)
+   - [Persistence](#persistence)
    - [Configuration](#configuration-file-handler)
-7. [Server Summary](#server-summary)
-8. [How the Research Agent Uses Each Server](#how-the-research-agent-uses-each-server)
-9. [Running the Servers](#running-the-servers)
-10. [Adding a New MCP Server](#adding-a-new-mcp-server)
+6. [Server Summary](#server-summary)
+7. [How the Research Agent Uses Each Server](#how-the-research-agent-uses-each-server)
+8. [Running the Servers](#running-the-servers)
+9. [Adding a New MCP Server](#adding-a-new-mcp-server)
 
 ---
 
 ## Overview
 
-The research assistant uses three independent MCP servers, each running in its own Docker container and communicating with the backend over a shared Docker network. Each server exposes a set of **tools** — callable functions that the agent's LLM can invoke during the tool-calling loop in `_execute_step`. Long-term memory is handled in-process via a direct Neo4j connection and is not an MCP server.
+The research assistant uses three independent MCP servers, each running in its own Docker container and communicating with the backend over a shared Docker network. Each server exposes a set of **tools** — callable functions that the agent's LLM can invoke during the tool-calling loop in `_execute_step`.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -64,22 +53,20 @@ The research assistant uses three independent MCP servers, each running in its o
 │  ├── "web_search"    → http://mcp-web-search-server:9393 │
 │  ├── "web_scraper"   → http://mcp-web-scraping-server:9292│
 │  └── "file_handler"  → http://mcp-file-handler-server:9191│
-│                                                          │
-│  AsyncLongTermMemory → Neo4j (bolt://neo4j:7687)         │
 └──────────────────────────────────────────────────────────┘
-          │               │               │              │
-          ▼               ▼               ▼              ▼
-    ┌──────────┐  ┌─────────────┐  ┌──────────┐  ┌──────────────┐
-    │ Neo4j    │  │ Web Search  │  │ Web      │  │ File Handler │
-    │ Graph DB │  │ Server      │  │ Scraper  │  │ Server       │
-    │ :7687    │  │ :9393       │  │ :9292    │  │ :9191        │
-    └──────────┘  └─────────────┘  └──────────┘  └──────┬───────┘
-                                                         │
-                                                    /app/data
-                                                       ./data
+          │               │               │
+          ▼               ▼               ▼
+   ┌─────────────┐  ┌──────────┐  ┌──────────────┐
+   │ Web Search  │  │ Web      │  │ File Handler │
+   │ Server      │  │ Scraper  │  │ Server       │
+   │ :9393       │  │ :9292    │  │ :9191        │
+   └─────────────┘  └──────────┘  └──────┬───────┘
+                                         │
+                                    /app/data
+                                       ./data
 ```
 
-The backend connects to all three MCP servers at startup via `create_mcp_registry()`. If a server is unreachable, the registry logs a warning and continues without it — research sessions will proceed with degraded capability rather than failing entirely. Long-term memory connects directly to Neo4j via the `neo4j` async driver (not an MCP server).
+The backend connects to all three MCP servers at startup via `create_mcp_registry()`. If a server is unreachable, the registry logs a warning and continues without it — research sessions will proceed with degraded capability rather than failing entirely.
 
 ---
 
@@ -130,215 +117,6 @@ Environment variables available in all containers:
 ### Network
 
 All services — including the backend — are attached to the `research-network` bridge network defined in `docker-compose.yml`. Containers address each other by Docker service name (e.g. `mcp-web-search-server`).
-
----
-
-## Long-Term Memory (In-Process, Neo4j-Backed)
-
-> **Module:** `backend/long_term_memory.py`  
-> **Database:** Neo4j (service name `neo4j`, port `7687`)
-
-### Purpose
-
-Provides **persistent, semantic long-term memory** for the research agent. Memories survive container restarts and accumulate across research sessions, allowing the agent to build up a growing knowledge base that informs future research planning. This is **not** an MCP server — it connects directly to Neo4j from within the backend process.
-
-### Storage Architecture
-
-```
-AsyncLongTermMemory  (backend/long_term_memory.py)
-       │
-       ├── :Memory nodes + memory_embedding_idx (vector index)
-       │     Stores: memory content, embeddings, metadata
-       │     Similarity: cosine via Neo4j vector index
-       │
-       ├── :Entity nodes + entity_embedding_idx
-       │     Stores: named entities with type, descriptions, confidence score
-       │
-       ├── :Community nodes + community_embedding_idx
-       │     Stores: LLM-generated cluster summaries
-       │
-       ├── :Source nodes
-       │     Stores: web source URL, title, credibility score
-       │
-       ├── :RELATES_TO edges  — directed factual relationships between entities
-       ├── :IS_A edges        — hierarchical taxonomy (child → parent)
-       ├── :CONTRADICTS edges — flags two relationships as conflicting claims
-       ├── :SOURCED_FROM edges — entity/memory → source URL node
-       └── :MEMBER_OF edges   — entities → community clusters
-```
-
-Embeddings are generated using the `all-MiniLM-L6-v2` sentence transformer model (loaded at backend startup via `warm_up_embeddings()`). All embedding calls are offloaded to a `ThreadPoolExecutor`.
-
-### Python API
-
-The `AsyncLongTermMemory` module is called directly from the backend (not via MCP). Its three primary methods are:
-
-#### `store(content, category, importance, tags, extra_metadata)`
-
-Stores a new memory with automatic embedding generation and near-duplicate detection.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `content` | `str` | *required* | The text content to remember |
-| `category` | `str` | `"general"` | Logical grouping label |
-| `importance` | `int` | `5` | Priority weight 1–10; higher = retrieved first |
-| `tags` | `List[str]` | `[]` | Free-form labels for filtering |
-| `extra_metadata` | `Dict` | `{}` | Arbitrary key-value pairs (stored with `custom_` prefix) |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "memory_id": "<uuid>",
-  "message": "Stored"
-}
-```
-
-If a memory with cosine similarity ≥ 0.95 already exists, the call returns `success: false` and the existing `memory_id` to prevent duplicate accumulation.
-
----
-
-#### `recall(query, category, min_importance, limit, similarity_threshold)`
-
-Retrieves memories using **semantic vector search** plus optional metadata filters.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `query` | `str` | `None` | Semantic search query — finds by *meaning*, not keywords |
-| `category` | `str` | `None` | Filter to a specific category |
-| `min_importance` | `int` | `None` | Only return memories at or above this importance level |
-| `limit` | `int` | `10` | Maximum number of memories to return |
-| `similarity_threshold` | `float` | `0.0` | Minimum cosine similarity to include (0.0–1.0) |
-
-If `query` is `None`, returns memories matching the metadata filters sorted by importance. Otherwise, performs a vector search and ranks results by `importance × similarity`.
-
-**Returns:** List of [Memory Record](#memory-record-shape) dicts.
-
----
-
-#### `find_similar(query, limit, min_similarity)`
-
-Convenience wrapper around `recall()` with a stricter default similarity threshold. Useful for associative recall — finding memories that are *semantically close* to a given concept.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `query` | `str` | *required* | Text to find similar memories for |
-| `limit` | `int` | `5` | Maximum results |
-| `min_similarity` | `float` | `0.7` | Minimum cosine similarity threshold |
-
-**Returns:** List of [Memory Record](#memory-record-shape) dicts.
-
----
-
-### Knowledge Graph API
-
-A richer set of graph-oriented methods is available via the `.graph` attribute (`AsyncLongTermMemory.graph`). The graph stores extracted named entities, their relationships, sourced URLs, and community clusters.
-
-| Method | Description |
-|---|---|
-| `graph.upsert_entity(name, entity_type, description, session_id)` | Create or update a named entity node |
-| `graph.store_relationship(source, target, relation, evidence, ...)` | Create a typed `RELATES_TO` edge between two entities |
-| `graph.store_hierarchy(child_name, parent_name)` | Create an `IS_A` edge (taxonomic relationship) |
-| `graph.store_contradiction(rel_id_a, rel_id_b, explanation, session_id)` | Flag two relationships as contradicting each other |
-| `graph.store_source(url, title, credibility_score)` | Persist a web source node |
-| `graph.link_to_source(entity_name, source_url)` | Attach a `SOURCED_FROM` edge to an entity |
-| `graph.find_entities(query, limit, include_hierarchy)` | Semantic search over entity nodes |
-| `graph.find_contradictions(entity_names, limit)` | Find contradiction edges involving named entities |
-| `graph.get_relationships(entity_ids, max_hops)` | Traverse the graph outward from given entity IDs |
-| `graph.get_communities(entity_ids)` | Return community clusters containing these entities |
-| `graph.get_provenance(entity_names)` | Find source nodes linked to given entities |
-| `graph.recall_graph_context(query, entity_limit, max_hops, ...)` | Combine entity search + graph traversal into a formatted context string |
-| `graph.decay_confidence(half_life_days)` | Apply exponential decay to `RELATES_TO` edge confidence scores |
-| `graph.prune(min_confidence, max_age_days, dry_run)` | Remove low-confidence, stale graph edges |
-| `graph.update_communities(summarize_fn)` | Re-cluster entities and regenerate LLM community summaries |
-| `graph.stats()` | Return aggregate counts of all node and edge types |
-
----
-
-### Memory Record Shape
-
-Every tool that returns memories uses this structure:
-
-```json
-{
-  "id": "<uuid>",
-  "content": "GLP-1 agonists reduce major adverse cardiovascular events by ~14%...",
-  "category": "insight",
-  "importance": 7,
-  "created_at": "2026-03-06T12:00:00",
-  "last_accessed": "2026-03-06T14:22:01",
-  "access_count": 3,
-  "tags": ["cardiology", "GLP-1", "RCT"],
-  "metadata": { "source_query": "cardiovascular effects of GLP-1 agonists" },
-  "similarity": 0.9142
-}
-```
-
-`similarity` is only present in query results and is computed as `1 - cosine_distance`.
-
----
-
-### Relationship Graph
-
-The knowledge graph stores typed, directed edges as native Neo4j relationships:
-
-| Type | Direction | Meaning |
-|---|---|---|
-| `RELATES_TO` | Entity → Entity | Directed factual relationship; carries `relation_type`, `evidence`, `confidence`, and `session_id` properties |
-| `IS_A` | Entity → Entity | Hierarchical taxonomy — child is a type of parent |
-| `CONTRADICTS` | Relationship → Relationship | Flags two `RELATES_TO` edges as containing conflicting claims |
-| `SOURCED_FROM` | Entity/Memory → Source | Provenance link to the web source the fact was found in |
-| `MEMBER_OF` | Entity → Community | Entity belongs to a cluster community |
-
-Confidence on `RELATES_TO` edges decays over time via `graph.decay_confidence()` and stale edges can be removed with `graph.prune()`.
-
----
-
-### Memory Scoring & Ranking
-
-`recall()` ranks results by `importance × similarity`:
-
-- A memory with `importance=10` and `similarity=0.5` scores `5.0`.
-- A memory with `importance=5` and `similarity=0.95` scores `4.75`.
-
-This means highly important memories can outrank slightly more semantically similar but lower-priority ones.
-
----
-
-### Memory Decay
-
-Knowledge graph edge confidence decays over time via two methods intended to be called periodically (e.g. by the `SelfOptimizingAgent`'s introspection cycle):
-
-- **`graph.decay_confidence(half_life_days)`** — Applies exponential decay to all `:RELATES_TO` edge confidence scores. Edges are not deleted; low-confidence edges are removed separately by `prune()`.
-
-- **`graph.prune(min_confidence, max_age_days, dry_run=False)`** — Removes `:RELATES_TO` edges whose confidence has fallen below `min_confidence` and which are older than `max_age_days`. Set `dry_run=True` to preview what would be removed without committing changes.
-
----
-
-### Deduplication
-
-Before storing a new memory, `store()` queries the `memory_embedding_idx` vector index for the nearest existing `:Memory` node. If its cosine similarity meets or exceeds `0.95`, the new memory is rejected and the existing `memory_id` is returned. This prevents accumulation of near-identical records from repeated research sessions on the same topic.
-
----
-
-### Persistence
-
-Neo4j data is persisted to a Docker named volume (`neo4j_data`) mapped to `/data` inside the container. This survives container restarts and rebuilds. To reset all memory, remove the named volume:
-
-```bash
-docker volume rm research-assistant_neo4j_data
-```
-
-### Configuration (Long-Term Memory)
-
-| Environment variable | Default | Description |
-|---|---|---|
-| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt protocol URI |
-| `NEO4J_USER` | `neo4j` | Neo4j authentication username |
-| `NEO4J_PASSWORD` | `research_pass` | Neo4j authentication password |
-| `NEO4J_DATABASE` | `neo4j` | Neo4j database name |
-| `NEO4J_EMBEDDING_DIMENSIONS` | `384` | Vector index dimension (must match embedding model) |
 
 ---
 
@@ -867,21 +645,17 @@ Files survive container restarts. To clear all outputs, delete `./data/documents
 | Web Scraper | `web_scraper` | `9292` | 1 | Stateless | Optional (`SCRAPER_SERVER_API_KEY`) |
 | File Handler | `file_handler` | `9191` | 7 | Filesystem (`./data`) | Optional (`FILE_SERVER_API_KEY`) |
 
-Long-term memory is handled in-process via a direct Neo4j connection — it is not registered in the `MCPServerRegistry`.
-
 ---
 
 ## How the Research Agent Uses Each Server
 
-The agent interacts with these servers at different points in the research lifecycle. The backend registers all three MCP servers at startup; the LLM then decides which tools to call during each step's tool-calling loop. Long-term memory is called directly (in-process) at plan and synthesis time.
+The agent interacts with these servers at different points in the research lifecycle. The backend registers all three MCP servers at startup; the LLM then decides which tools to call during each step's tool-calling loop.
 
 | Phase | Component | Call | Purpose |
 |---|---|---|---|
-| `generate_plan` | `AsyncLongTermMemory` | `memory.recall(query)` | Prime planning prompt with relevant prior knowledge |
 | `_execute_step` | Web Search MCP | `web_search`, `search_wikipedia`, `search_github` | Find relevant URLs and snippets |
 | `_execute_step` | Web Scraper MCP | `scrape_url` | Fetch full page content from URLs found by search |
 | `_execute_step` | File Handler MCP | `read_file`, `list_files` | Read any uploaded reference documents |
-| `synthesize_results` | `AsyncLongTermMemory` | `memory.store(content, ...)` | Persist research session and per-insight records |
 | `synthesize_results` | File Handler MCP | `write_file` | Save the final Markdown research report |
 
 In the v2 Orchestrator, the same servers are used but routing goes through the specialist sub-agents: the `SearchAgent` primarily drives `web_search` and `scrape_url`, while the `ReportComposer` output is saved manually by the Orchestrator after `synthesise()` completes.
@@ -908,12 +682,6 @@ Verify individual MCP server health:
 curl http://localhost:9393/health   # Web Search
 curl http://localhost:9292/health   # Web Scraper
 curl http://localhost:9191/health   # File Handler
-```
-
-Verify Neo4j (used by the in-process long-term memory):
-
-```bash
-curl http://localhost:7474   # Neo4j Browser UI
 ```
 
 ---

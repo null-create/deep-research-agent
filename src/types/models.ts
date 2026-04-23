@@ -1,4 +1,4 @@
-export type Backend = 'ollama' | 'openai' | 'azure' | 'aws' | 'gcp' | 'huggingface';
+export type Backend = 'ollama' | 'openai' | 'azure' | 'aws' | 'bedrock' | 'anthropic' | 'gcp' | 'huggingface';
 
 export interface AgentParams {
   model: string;

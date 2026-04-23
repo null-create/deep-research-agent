@@ -43,8 +43,9 @@ from pipeline import PipelineRunner, MAX_CONCURRENT_PIPELINES
 from search_result_store import SearchResultStore
 from model_backend import (
     ModelBackend,
+    AnthropicBackend,
     AzureOpenAIBackend,
-    BedrockBackend,
+    AWSOpenAIBackend,
     GCPVertexAIBackend,
     HuggingFaceBackend,
     OllamaBackend,
@@ -3778,7 +3779,7 @@ Return ONLY a JSON object:
                 if is_heavy
                 else (cfg.azure_light_model if is_light else cfg.azure_heavy_model)
             )
-        elif isinstance(backend, BedrockBackend):
+        elif isinstance(backend, AWSOpenAIBackend):
             return cfg.aws_heavy_model if is_heavy else cfg.aws_light_model
         elif isinstance(backend, GCPVertexAIBackend):
             return cfg.gcp_heavy_model if is_heavy else cfg.gcp_light_model
@@ -3786,6 +3787,8 @@ Return ONLY a JSON object:
             return cfg.ollama_heavy_model if is_heavy else cfg.ollama_light_model
         elif isinstance(backend, HuggingFaceBackend):
             return None  # HuggingFace backends use a single configured model
+        elif isinstance(backend, AnthropicBackend):
+            return cfg.anthropic_heavy_model if is_heavy else cfg.anthropic_light_model
         else:
             return None  # Let the backend use its own default
 
