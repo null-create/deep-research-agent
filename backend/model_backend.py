@@ -16,8 +16,7 @@ from observability import get_logger
 
 logger = get_logger(__name__)
 
-# This header is used by the AI Gateway to track application specific calls and token usage.
-# Helpful for observability and cost tracking when using OpenAI, Azure OpenAI, and AWS Bedrock APIs.
+# Default headers for all API calls - can be overridden by providing custom headers when initializing backends.
 HEADERS_FILE = os.path.join(os.path.dirname(__file__), "headers.json")
 if not os.path.exists(HEADERS_FILE):
     logger.warning(
