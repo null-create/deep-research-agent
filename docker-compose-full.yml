@@ -103,24 +103,24 @@ services:
     networks:
       - research-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9393/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9393/health" ]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 10s
 
-  mcp-web-scraping-server:
+  mcp-fetch-server:
     build:
-      context: ./mcp/web_scrape
+      context: ./mcp/fetch
       dockerfile: Dockerfile
     ports:
       - "9292:9292"
-    env_file: ./mcp/web_scrape/.env
+    env_file: ./mcp/fetch/.env
     restart: unless-stopped
     networks:
       - research-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9292/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9292/health" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -139,7 +139,7 @@ services:
     networks:
       - research-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9191/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9191/health" ]
       interval: 5s
       timeout: 3s
       retries: 10

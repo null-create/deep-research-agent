@@ -269,12 +269,12 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 @mcp.tool(
-    name="scrape_url",
+    name="fetch_url",
     description="""Fetch and extract the text content of a web page. 
     Rejects non-text content (PDFs, images, binary files). Strips boilerplate 
     (nav, footer, ads, cookie banners) and extracts the main article content when possible.""",
 )
-async def scrape_url(
+async def fetch_url(
     url: str,
     include_links: bool = False,
     include_images: bool = False,
@@ -419,7 +419,7 @@ async def cleanup():
 
 if __name__ == "__main__":
     try:
-        logger.info(f"Starting Web Scraper MCP Server on {HOST_ADDR}:{HOST_PORT}...")
+        logger.info(f"Starting Web fetch MCP Server on {HOST_ADDR}:{HOST_PORT}...")
         mcp.run(transport="streamable-http")
     except KeyboardInterrupt:
         logger.info("Shutting down server...")

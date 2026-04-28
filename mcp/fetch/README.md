@@ -1,4 +1,4 @@
-# Web Scraper MCP Server
+# Web Fetch MCP Server
 
 A Model Context Protocol (MCP) server that provides web scraping capabilities using FastMCP. This server allows AI agents to fetch, parse, and extract content from web pages with various filtering and formatting options.
 
