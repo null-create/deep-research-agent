@@ -465,7 +465,7 @@ async def _deep_scrape(
 ) -> List[Dict[str, Any]]
 ```
 
-Recursively scrapes a URL via the `web_scraper` MCP server and follows relevant child links up to `max_depth` levels. At each level:
+Recursively scrapes a URL via the `fetch` MCP server and follows relevant child links up to `max_depth` levels. At each level:
 
 1. Calls the `scrape` MCP tool with `extract_links=True`.
 2. Passes the extracted links to `_filter_relevant_links()` to select the top 3 most relevant.
@@ -641,7 +641,7 @@ The agent accesses four MCP servers, all registered in `MCPServerRegistry` at st
 |---|---|---|
 | `memory` | `http://mcp-memory-server:9494/mcp` | `recall_memories`, `store_memory`, `retrieve_all_memories` |
 | `web_search` | `http://mcp-web-search-server:9393/mcp` | `search` (via `get_all_tools` tool-calling) |
-| `web_scraper` | `http://mcp-web-scraping-server:9292/mcp` | `scrape` (via `get_all_tools` tool-calling) |
+| `fetch` | `http://mcp-fetch-server:9292/mcp` | `fetch_url` (via `get_all_tools` tool-calling) |
 | `file_handler` | `http://mcp-file-handler-server:9191/mcp` | `write_file`, `list_files` |
 
 During `_execute_step`, the agent calls `mcp_servers.get_all_tools()` to retrieve the full tool spec list from every connected server and passes it to the model. The model may then invoke any of those tools freely; `MCPServerRegistry.call_tool` routes each call to the correct server automatically by matching the tool name against each server's registered spec.

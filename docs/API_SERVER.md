@@ -56,7 +56,7 @@ create_mcp_registry(config)          ← connects to all MCP servers
       │
       ├── memory       (MEMORY_SERVER_URL)
       ├── web_search   (SEARCH_SERVER_URL)
-      ├── web_scraper  (SCRAPER_SERVER_URL)
+      ├── fetch  (FETCH_SERVER_URL)
       └── file_handler (FILE_SERVER_URL)
       │
       ├── agent      = AdvancedResearchAgent | SelfOptimizingAgent
@@ -145,7 +145,7 @@ Lists the names of all MCP servers that are currently registered and connected.
 
 ```json
 {
-  "servers": ["memory", "web_search", "web_scraper", "file_handler"]
+  "servers": ["memory", "web_search", "fetch", "file_handler"]
 }
 ```
 
@@ -635,7 +635,7 @@ A plan step failed. Research continues with remaining steps.
 {
   "type": "step_failed",
   "message": "Step 2 failed",
-  "error": "Connection timeout to web_scraper MCP server"
+  "error": "Connection timeout to fetch MCP server"
 }
 ```
 

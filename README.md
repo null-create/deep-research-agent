@@ -101,7 +101,7 @@ OLLAMA_MODEL=nemotron-3-nano
 
 # ── MCP server URLs ───────────────────────────────────────────
 SEARCH_SERVER_URL=http://localhost:9393/mcp
-SCRAPER_SERVER_URL=http://localhost:9292/mcp
+FETCH_SERVER_URL=http://localhost:9292/mcp
 FILE_SERVER_URL=http://localhost:9191/mcp
 
 # ── Search backend (used by web_search MCP server) ────────────
@@ -146,7 +146,7 @@ See [docs/API_SERVER.md](docs/API_SERVER.md) for the full environment variable r
 | Server | Port | Tools |
 |--------|------|-------|
 | `mcp/web_search/` | 9393 | `web_search`, `image_search`, `video_search`, `search_wikipedia`, `search_github`, `search_arxiv`, `search_semantic_scholar` |
-| `mcp/web_scrape/` | 9292 | `scrape_url` |
+| `mcp/fetch/` | 9292 | `fetch_url` |
 | `mcp/file_handler/` | 9191 | `list_files`, `read_file`, `streaming_read_file`, `write_file`, `upload_file`, `download_file`, `run_command` |
 
 Long-term memory is handled in-process by `backend/long_term_memory.py`, backed by Neo4j. It has two layers:

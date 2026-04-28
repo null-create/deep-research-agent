@@ -76,7 +76,7 @@ The SearchAgent is optimised for **high recall**. Its system prompt explicitly i
 - Bypass SEO-spam, link farms, and thin content pages.
 - Return *verbatim* excerpts rather than paraphrasing — raw fidelity is preserved for the AnalystAgent to work from.
 
-It is the only agent that receives MCP tool specs at call time, giving it live access to the `web_search` and `web_scraper` MCP servers registered in `MCPServerRegistry`.
+It is the only agent that receives MCP tool specs at call time, giving it live access to the `web_search` and `fetch` MCP servers registered in `MCPServerRegistry`.
 
 ---
 
@@ -562,7 +562,7 @@ Emitted when a plan step begins execution.
 Emitted when a plan step finishes successfully (after QA passes or retries are exhausted).
 
 ```json
-{ "type": "step_complete", "message": "Step 1 complete.", "data": { "step": { ... }, "tools_used": ["web_search", "web_scraper"], "qa_retries": 1, "step_summary": "Brief bullet summary of what this step found." } }
+{ "type": "step_complete", "message": "Step 1 complete.", "data": { "step": { ... }, "tools_used": ["web_search", "fetch"], "qa_retries": 1, "step_summary": "Brief bullet summary of what this step found." } }
 ```
 
 #### `step_failed`

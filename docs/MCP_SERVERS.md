@@ -51,7 +51,7 @@ The research assistant uses three independent MCP servers, each running in its o
 │                                                          │
 │  MCPServerRegistry                                       │
 │  ├── "web_search"    → http://mcp-web-search-server:9393 │
-│  ├── "web_scraper"   → http://mcp-web-scraping-server:9292│
+│  ├── "fetch"   → http://mcp-fetch-server:9292│
 │  └── "file_handler"  → http://mcp-file-handler-server:9191│
 └──────────────────────────────────────────────────────────┘
           │               │               │
@@ -642,7 +642,7 @@ Files survive container restarts. To clear all outputs, delete `./data/documents
 | Server | Registry key | Port | Tools | Storage | Auth |
 |---|---|---|---|---|---|
 | Web Search | `web_search` | `9393` | 7 | Stateless | Optional (`SEARCH_SERVER_API_KEY`) |
-| Web Scraper | `web_scraper` | `9292` | 1 | Stateless | Optional (`SCRAPER_SERVER_API_KEY`) |
+| Fetch | `fetch` | `9292` | 1 | Stateless | Optional (`FETCH_SERVER_API_KEY`) |
 | File Handler | `file_handler` | `9191` | 7 | Filesystem (`./data`) | Optional (`FILE_SERVER_API_KEY`) |
 
 ---
