@@ -42,7 +42,7 @@ services:
         condition: service_healthy
       mcp-file-handler-server:
         condition: service_healthy
-      mcp-web-search-server:
+      mcp-fetch-server:
         condition: service_healthy
       mcp-web-scraping-server:
         condition: service_healthy
