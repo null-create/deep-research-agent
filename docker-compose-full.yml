@@ -42,9 +42,9 @@ services:
         condition: service_healthy
       mcp-file-handler-server:
         condition: service_healthy
-      mcp-fetch-server:
+      mcp-web-search-server:
         condition: service_healthy
-      mcp-web-scraping-server:
+      mcp-fetch-server:
         condition: service_healthy
 
   neo4j:
