@@ -728,7 +728,7 @@ async def create_mcp_registry(config: Config) -> MCPServerRegistry:
     # Register the three built-in streamable-http servers.
     builtin_servers = [
         ("web_search", config.search_server_url),
-        ("web_scraper", config.scraper_server_url),
+        ("fetch", config.fetch_server_url),
         ("file_handler", config.file_server_url),
     ]
     for server_name, server_url in builtin_servers:
