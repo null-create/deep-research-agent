@@ -234,13 +234,13 @@ class Config(BaseModel):
 
     # Web scraping server (port 9292): scrape_url (content extraction, metadata,
     # boilerplate removal).
-    scraper_server_url: str = Field(
+    fetch_server_url: str = Field(
         default_factory=lambda: os.getenv(
-            "SCRAPER_SERVER_URL", "http://localhost:9292/mcp"
+            "FETCH_SERVER_URL", "http://localhost:9292/mcp"
         )
     )
-    scraper_server_api_key: Optional[str] = Field(
-        default_factory=lambda: os.getenv("SCRAPER_SERVER_API_KEY")
+    fetch_server_api_key: Optional[str] = Field(
+        default_factory=lambda: os.getenv("FETCH_SERVER_API_KEY")
     )
 
     # File handler server (port 9191): list_files, read_file, write_file,
