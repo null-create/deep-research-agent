@@ -4,7 +4,7 @@ cli.py
 Textual-based TUI for the Research Assistant.
 
 Three modes are available:
-    research      — full Orchestrator pipeline: plan → execute → synthesise
+    research      — full Orchestrator pipeline: plan → execute → synthesize
     chat          — single-turn Q&A via the Root agent
     self-optimize — SelfOptimizingAgent memory-analysis and method development
 
@@ -25,10 +25,12 @@ Options
 
 from __future__ import annotations
 
+import json
 import os
 import asyncio
 import argparse
 import sys
+from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -46,11 +48,14 @@ from textual.widgets import (
     Input,
     Label,
     Markdown,
+    OptionList,
     ProgressBar,
     RichLog,
     Static,
 )
+from textual.widgets.option_list import Option
 
+from art import text2art
 from rich.text import Text
 
 load_dotenv()
@@ -64,6 +69,7 @@ from orchestrator import Orchestrator, AgentPool
 from optimization import SelfOptimizingAgent
 from long_term_memory import AsyncLongTermMemory
 from models import Message, ResearchPlan, ResearchStep, StepStatus
+from session_store import SessionStore
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CSS
@@ -74,41 +80,282 @@ Screen {
     background: $surface;
 }
 
-/* ── Mode Picker ─────────────────────────────────────────────────── */
-#mode-picker {
+/* ── Home Screen ──────────────────────────────────────────────────── */
+#home-outer {
     align: center middle;
     height: 100%;
 }
 
-#mode-picker-card {
-    width: 64;
+#home-card {
+    width: 90;
+    max-width: 100%;
     height: auto;
-    border: round $primary;
-    padding: 2 4;
+    padding: 1 2;
     background: $panel;
+    border: round $primary;
 }
 
-#mode-picker-title {
+#home-banner {
     text-align: center;
-    text-style: bold;
     color: $primary;
-    margin-bottom: 1;
+    margin-bottom: 0;
 }
 
-#mode-picker-subtitle {
+#home-version {
     text-align: center;
     color: $text-muted;
-    margin-bottom: 2;
-}
-
-.mode-btn {
-    width: 100%;
     margin-bottom: 1;
 }
 
-#btn-research { background: $primary; }
-#btn-chat     { background: $success; }
-#btn-optimize { background: $warning; }
+#home-status {
+    text-align: center;
+    color: $success;
+    margin-bottom: 1;
+}
+
+#home-commands {
+    color: $text-muted;
+    margin-bottom: 1;
+    padding: 1 2;
+}
+
+#home-hint {
+    text-align: center;
+    color: $text-muted;
+    text-style: italic;
+    margin-bottom: 1;
+}
+
+#home-input-bar {
+    height: 3;
+    layout: horizontal;
+    dock: bottom;
+}
+
+#home-input {
+    width: 1fr;
+}
+
+#command-dropdown {
+    max-height: 12;
+    height: auto;
+    border: round $primary-darken-2;
+    background: $panel;
+    display: none;
+    margin-top: 0;
+    padding: 0 1;
+}
+
+#command-dropdown > .option-list--option-highlighted {
+    background: $primary-darken-1;
+}
+
+#home-feedback {
+    text-align: center;
+    color: $warning;
+    height: auto;
+    margin-top: 1;
+}
+
+/* ── Models Screen ───────────────────────────────────────────────── */
+#models-panel {
+    height: auto;
+    max-height: 12;
+    border: round $primary-darken-2;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+#models-current {
+    text-style: bold;
+    color: $success;
+    margin-bottom: 1;
+}
+
+.models-section {
+    color: $primary;
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#models-backend-list {
+    height: auto;
+    max-height: 10;
+    margin-bottom: 1;
+}
+
+.backend-item {
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+.backend-item.selected {
+    color: $success;
+    text-style: bold;
+}
+
+#models-form {
+    height: auto;
+    border: round $primary-darken-2;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.models-label {
+    margin-bottom: 0;
+    color: $text-muted;
+}
+
+#models-input-model {
+    margin-bottom: 1;
+}
+
+#models-input-api-key {
+    margin-bottom: 1;
+}
+
+#models-input-base-url {
+    margin-bottom: 1;
+}
+
+#models-actions {
+    layout: horizontal;
+    height: 3;
+}
+
+#btn-models-apply {
+    width: 20;
+    background: $success;
+    margin-right: 1;
+}
+
+#btn-models-cancel {
+    width: 20;
+    background: $error;
+}
+
+/* ── MCP Screen ──────────────────────────────────────────────────── */
+#mcp-server-list {
+    height: 1fr;
+    border: round $primary-darken-2;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.mcp-server-entry {
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+.mcp-server-entry.connected { color: $success; }
+.mcp-server-entry.disconnected { color: $error; }
+
+#mcp-tools-panel {
+    height: 1fr;
+    border: round $success;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+#mcp-tools-title {
+    text-style: bold;
+    color: $success;
+    margin-bottom: 1;
+}
+
+#mcp-add-form {
+    height: auto;
+    border: round $warning;
+    padding: 1;
+    margin-bottom: 1;
+    display: none;
+}
+
+.mcp-label {
+    margin-bottom: 0;
+    color: $text-muted;
+}
+
+#mcp-input-name {
+    margin-bottom: 1;
+}
+
+#mcp-input-transport {
+    margin-bottom: 1;
+}
+
+#mcp-input-url {
+    margin-bottom: 1;
+}
+
+#mcp-add-actions {
+    layout: horizontal;
+    height: 3;
+}
+
+#btn-mcp-add {
+    width: 20;
+    background: $warning;
+    margin-right: 1;
+}
+
+#btn-mcp-show-add {
+    width: 26;
+    background: $warning;
+    margin-bottom: 1;
+}
+
+#btn-mcp-remove {
+    width: 26;
+    background: $error;
+    margin-bottom: 1;
+}
+
+/* ── Sessions Screen ─────────────────────────────────────────────── */
+#sessions-list {
+    height: 1fr;
+    border: round $primary-darken-2;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+.session-entry {
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+.session-entry.session-complete { color: $success; }
+.session-entry.session-active { color: $warning; text-style: bold; }
+.session-entry.session-error { color: $error; }
+
+#sessions-detail {
+    height: auto;
+    max-height: 10;
+    border: round $success;
+    padding: 1;
+    margin-bottom: 1;
+    display: none;
+}
+
+#sessions-actions {
+    layout: horizontal;
+    height: 3;
+    margin-bottom: 1;
+}
+
+#btn-session-new {
+    width: 20;
+    background: $primary;
+    margin-right: 1;
+}
+
+#btn-session-resume {
+    width: 20;
+    background: $success;
+    margin-right: 1;
+    display: none;
+}
 
 /* ── Shared layout ───────────────────────────────────────────────── */
 #main-layout {
@@ -302,71 +549,225 @@ Screen {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Mode-Picker Screen
+# Home Screen (replaces Mode Picker)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_ASCII_BANNER = text2art("Deep Research", font="small")
 
-class ModePickerScreen(Screen):
-    """Full-screen mode selection shown on startup."""
+_COMMAND_HELP = """\
+  [bold cyan]/research[/] [dim]<query>[/dim]  — Deep multi-agent investigation
+  [bold cyan]/chat[/]                — Interactive Q&A with the agent
+  [bold cyan]/optimize[/]            — Analyse memories & evolve methods
+  [bold cyan]/models[/]              — View / change the model backend
+  [bold cyan]/mcp[/]                 — View / manage MCP servers
+  [bold cyan]/sessions[/]            — Browse & resume past sessions
+  [bold cyan]/new[/]                 — Start a fresh session
+  [bold cyan]/help[/]                — Show this command list
+  [bold cyan]/exit[/]                — Quit the application\
+"""
+
+
+class HomeScreen(Screen):
+    """ASCII-art home with slash-command input, inspired by Copilot / Claude Code."""
 
     BINDINGS = [
-        Binding("1", "pick_research", "Research"),
-        Binding("2", "pick_chat", "Chat"),
-        Binding("3", "pick_optimize", "Self-Optimize"),
+        Binding("1", "shortcut_research", "Research", show=False),
+        Binding("2", "shortcut_chat", "Chat", show=False),
+        Binding("3", "shortcut_optimize", "Self-Optimize", show=False),
         Binding("q", "quit_app", "Quit"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with Container(id="mode-picker"):
-            with Vertical(id="mode-picker-card"):
-                yield Label("🔬  Research Assistant", id="mode-picker-title")
+        with Container(id="home-outer"):
+            with Vertical(id="home-card"):
+                yield Static(_ASCII_BANNER, id="home-banner")
+                yield Label("v1.0.0", id="home-version")
+                yield Label(self._status_line(), id="home-status")
+                yield Static(_COMMAND_HELP, id="home-commands", markup=True)
                 yield Label(
-                    "Select an operating mode  (or press 1 / 2 / 3)",
-                    id="mode-picker-subtitle",
+                    "Type a /command below, or press 1 / 2 / 3 for quick access",
+                    id="home-hint",
                 )
-                yield Button(
-                    "1  Research         — Deep multi-agent investigation",
-                    id="btn-research",
-                    classes="mode-btn",
-                )
-                yield Button(
-                    "2  Chat             — Interactive Q&A with the agent",
-                    id="btn-chat",
-                    classes="mode-btn",
-                )
-                yield Button(
-                    "3  Self-Optimize    — Analyse memories & evolve methods",
-                    id="btn-optimize",
-                    classes="mode-btn",
-                )
+                yield Label("", id="home-feedback")
+                with Horizontal(id="home-input-bar"):
+                    yield Input(
+                        placeholder="Enter a /command…",
+                        id="home-input",
+                    )
+                yield OptionList(id="command-dropdown")
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        actions = {
-            "btn-research": self.action_pick_research,
-            "btn-chat": self.action_pick_chat,
-            "btn-optimize": self.action_pick_optimize,
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _status_line(self) -> str:
+        cfg = self.app.config
+        backend = cfg.model_backend
+        model_env_map = {
+            "openai": cfg.openai_model,
+            "ollama": cfg.ollama_model,
+            "azure": cfg.azure_deployment_name,
+            "bedrock": cfg.aws_model,
+            "aws": cfg.aws_model,
+            "gcp": cfg.gcp_model,
+            "anthropic": cfg.anthropic_model,
+            "huggingface": cfg.huggingface_model,
         }
-        handler = actions.get(event.button.id)
+        model = model_env_map.get(backend, "unknown")
+        n_servers = len(self.app.mcp_registry.server_configs)
+        return f"Backend: {backend}  |  Model: {model}  |  MCP servers: {n_servers}"
+
+    def _show_feedback(self, text: str) -> None:
+        self.query_one("#home-feedback", Label).update(text)
+
+    def _refresh_status(self) -> None:
+        self.query_one("#home-status", Label).update(self._status_line())
+
+    # ── Command dropdown (autocomplete) ───────────────────────────────────────
+
+    _ALL_COMMANDS: list[tuple[str, str]] = [
+        ("/research", "Deep multi-agent investigation"),
+        ("/chat", "Interactive Q&A with the agent"),
+        ("/optimize", "Analyse memories & evolve methods"),
+        ("/models", "View / change the model backend"),
+        ("/mcp", "View / manage MCP servers"),
+        ("/sessions", "Browse & resume past sessions"),
+        ("/new", "Start a fresh session"),
+        ("/help", "Show command list"),
+        ("/exit", "Quit the application"),
+    ]
+
+    @on(Input.Changed, "#home-input")
+    def _filter_dropdown(self, event: Input.Changed) -> None:
+        dropdown = self.query_one("#command-dropdown", OptionList)
+        value = event.value.strip()
+        if not value.startswith("/"):
+            dropdown.styles.display = "none"
+            return
+        dropdown.clear_options()
+        prefix = value.lower()
+        matches = [
+            (cmd, desc) for cmd, desc in self._ALL_COMMANDS if cmd.startswith(prefix)
+        ]
+        if matches:
+            for cmd, desc in matches:
+                dropdown.add_option(Option(f"{cmd}  — {desc}", id=cmd))
+            dropdown.styles.display = "block"
+        else:
+            dropdown.styles.display = "none"
+
+    @on(OptionList.OptionSelected, "#command-dropdown")
+    def _dropdown_selected(self, event: OptionList.OptionSelected) -> None:
+        cmd = event.option_id
+        inp = self.query_one("#home-input", Input)
+        inp.value = cmd
+        self.query_one("#command-dropdown", OptionList).styles.display = "none"
+        inp.focus()
+
+    # ── Slash-command dispatcher ──────────────────────────────────────────────
+
+    @on(Input.Submitted, "#home-input")
+    def handle_command(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        inp = self.query_one("#home-input", Input)
+        inp.value = ""
+        self.query_one("#command-dropdown", OptionList).styles.display = "none"
+        if not raw:
+            return
+
+        if not raw.startswith("/"):
+            self._show_feedback("Type /help for commands, or /chat to start chatting.")
+            return
+
+        parts = raw.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        dispatch = {
+            "/exit": lambda: self.app.exit(),
+            "/quit": lambda: self.app.exit(),
+            "/help": lambda: self._show_help(),
+            "/research": lambda: self._open_research(arg),
+            "/chat": lambda: self._open_chat(),
+            "/optimize": lambda: self._open_optimize(),
+            "/models": lambda: self._open_models(),
+            "/mcp": lambda: self._open_mcp(),
+            "/sessions": lambda: self._open_sessions(),
+            "/new": lambda: self._new_session(),
+        }
+
+        handler = dispatch.get(cmd)
         if handler:
             handler()
+        else:
+            self._show_feedback(f"Unknown command: {cmd}  — type /help")
 
-    def action_pick_research(self) -> None:
-        self.app.push_screen(ResearchScreen(self.app.orchestrator, self.app.config))
+    def _show_help(self) -> None:
+        self._show_feedback("")
+        self.query_one("#home-commands", Static).update(_COMMAND_HELP)
 
-    def action_pick_chat(self) -> None:
+    def _open_research(self, query: str = "") -> None:
+        screen = ResearchScreen(self.app.orchestrator, self.app.config)
+        self.app.push_screen(screen)
+        if query:
+            self.app.call_after_refresh(lambda: self.app._auto_run_query(screen, query))
+
+    def _open_chat(self) -> None:
         self.app.push_screen(ChatScreen(self.app.orchestrator, self.app.config))
 
-    def action_pick_optimize(self) -> None:
+    def _open_optimize(self) -> None:
         self.app.push_screen(
             SelfOptimizeScreen(
                 self.app.config, self.app.mcp_registry, self.app.long_term_memory
             )
         )
 
+    def _open_models(self) -> None:
+        self.app.push_screen(ModelsScreen())
+
+    def _open_mcp(self) -> None:
+        self.app.push_screen(MCPScreen())
+
+    def _open_sessions(self) -> None:
+        self.app.push_screen(SessionsScreen())
+
+    def _new_session(self) -> None:
+        self._show_feedback("New session started — state reset.")
+        # Rebuild orchestrator with a clean slate
+        self.app.call_after_refresh(self._rebuild_orchestrator)
+
+    @work(exclusive=True, thread=False)
+    async def _rebuild_orchestrator(self) -> None:
+        cfg = self.app.config
+        model_backend = create_model_backend(cfg)
+        agent_pool = AgentPool.from_single_backend(model_backend)
+        await agent_pool.async_init(self.app.mcp_registry)
+        self.app.orchestrator = Orchestrator(
+            config=cfg,
+            mcp_registry=self.app.mcp_registry,
+            agent_pool=agent_pool,
+            long_term_memory=self.app.long_term_memory,
+            research_depth="shallow",
+        )
+        self._show_feedback("✔ New session ready.")
+
+    # ── Keyboard shortcuts (legacy 1/2/3) ─────────────────────────────────────
+
+    def action_shortcut_research(self) -> None:
+        self._open_research()
+
+    def action_shortcut_chat(self) -> None:
+        self._open_chat()
+
+    def action_shortcut_optimize(self) -> None:
+        self._open_optimize()
+
     def action_quit_app(self) -> None:
         self.app.exit()
+
+    def on_screen_resume(self) -> None:
+        """Refresh status line when returning from a sub-screen."""
+        self._refresh_status()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1094,6 +1495,654 @@ class SelfOptimizeScreen(Screen):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Models Screen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ALL_BACKENDS = [
+    "openai",
+    "ollama",
+    "anthropic",
+    "azure",
+    "bedrock",
+    "aws",
+    "gcp",
+    "huggingface",
+]
+
+
+class ModelsScreen(Screen):
+    """View and switch the active model backend."""
+
+    BINDINGS = [
+        Binding("escape", "go_back", "← Back"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._selected_backend: str = ""
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="main-layout"):
+            with Vertical(id="sidebar"):
+                yield Label("🤖  Models", id="sidebar-title")
+                yield Label("Current config", classes="sidebar-section")
+                yield Label(
+                    f"  Backend: {self.app.config.model_backend}",
+                    id="sidebar-backend",
+                    classes="sidebar-item active",
+                )
+                yield Label("Backends:", classes="sidebar-section")
+                for b in _ALL_BACKENDS:
+                    cls = "selected" if b == self.app.config.model_backend else ""
+                    yield Label(
+                        f"  {b}",
+                        classes=f"sidebar-item backend-item {cls}".strip(),
+                        id=f"sidebar-b-{b}",
+                    )
+
+            with Vertical(id="content-area"):
+                yield Label("", id="models-current")
+                yield Label("Select a backend:", classes="models-section")
+                with ScrollableContainer(id="models-backend-list"):
+                    for b in _ALL_BACKENDS:
+                        yield Button(
+                            f"  {b}",
+                            id=f"btn-backend-{b}",
+                            classes="mode-btn",
+                        )
+
+                with Vertical(id="models-form"):
+                    yield Label("Model name:", classes="models-label")
+                    yield Input(
+                        placeholder="e.g. gpt-4o, llama3.2…", id="models-input-model"
+                    )
+                    yield Label("API key (optional):", classes="models-label")
+                    yield Input(
+                        placeholder="sk-… (leave blank to keep current)",
+                        id="models-input-api-key",
+                        password=True,
+                    )
+                    yield Label("Base URL (optional):", classes="models-label")
+                    yield Input(
+                        placeholder="https://… (leave blank to keep current)",
+                        id="models-input-base-url",
+                    )
+
+                with Horizontal(id="models-actions"):
+                    yield Button("✔  Apply", id="btn-models-apply")
+                    yield Button("✘  Cancel", id="btn-models-cancel")
+
+                yield Label("", id="home-feedback")
+
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._selected_backend = self.app.config.model_backend
+        self._refresh_current_label()
+        self._prefill_model()
+
+    def _refresh_current_label(self) -> None:
+        cfg = self.app.config
+        model_map = {
+            "openai": cfg.openai_model,
+            "ollama": cfg.ollama_model,
+            "azure": cfg.azure_deployment_name,
+            "bedrock": cfg.aws_model,
+            "aws": cfg.aws_model,
+            "gcp": cfg.gcp_model,
+            "anthropic": cfg.anthropic_model,
+            "huggingface": cfg.huggingface_model,
+        }
+        model = model_map.get(cfg.model_backend, "unknown")
+        self.query_one("#models-current", Label).update(
+            f"Active: {cfg.model_backend} / {model}"
+        )
+
+    def _prefill_model(self) -> None:
+        cfg = self.app.config
+        model_map = {
+            "openai": cfg.openai_model,
+            "ollama": cfg.ollama_model,
+            "azure": cfg.azure_deployment_name,
+            "bedrock": cfg.aws_model,
+            "aws": cfg.aws_model,
+            "gcp": cfg.gcp_model,
+            "anthropic": cfg.anthropic_model,
+            "huggingface": cfg.huggingface_model,
+        }
+        self.query_one("#models-input-model", Input).value = (
+            model_map.get(self._selected_backend, "") or ""
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid.startswith("btn-backend-"):
+            backend = bid.removeprefix("btn-backend-")
+            self._selected_backend = backend
+            # Update sidebar highlight
+            for b in _ALL_BACKENDS:
+                lbl = self.query_one(f"#sidebar-b-{b}", Label)
+                lbl.remove_class("selected")
+            self.query_one(f"#sidebar-b-{backend}", Label).add_class("selected")
+            self._prefill_model()
+
+        elif bid == "btn-models-apply":
+            self._apply_model()
+
+        elif bid == "btn-models-cancel":
+            self.app.pop_screen()
+
+    @work(exclusive=True, thread=False)
+    async def _apply_model(self) -> None:
+        backend = self._selected_backend
+        model = self.query_one("#models-input-model", Input).value.strip()
+        api_key = self.query_one("#models-input-api-key", Input).value.strip()
+        base_url = self.query_one("#models-input-base-url", Input).value.strip()
+
+        if not model:
+            self.query_one("#home-feedback", Label).update("Please enter a model name.")
+            return
+
+        # Update environment variables so Config picks them up
+        os.environ["MODEL_BACKEND"] = backend
+        env_model_map = {
+            "openai": "OPENAI_MODEL",
+            "ollama": "OLLAMA_MODEL",
+            "bedrock": "AWS_MODEL",
+            "aws": "AWS_MODEL",
+            "azure": "AZURE_OPENAI_DEPLOYMENT",
+            "gcp": "GCP_MODEL",
+            "anthropic": "ANTHROPIC_MODEL",
+            "huggingface": "HUGGINGFACE_MODEL",
+        }
+        os.environ[env_model_map.get(backend, "OLLAMA_MODEL")] = model
+
+        if api_key:
+            key_map = {
+                "openai": "OPENAI_API_KEY",
+                "azure": "AZURE_OPENAI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+                "aws": "AWS_API_KEY",
+                "gcp": "GCP_API_KEY",
+                "huggingface": "HUGGINGFACE_API_KEY",
+            }
+            env_key = key_map.get(backend)
+            if env_key:
+                os.environ[env_key] = api_key
+
+        if base_url:
+            url_map = {
+                "openai": "OPENAI_BASE_URL",
+                "ollama": "OLLAMA_BASE_URL",
+                "azure": "AZURE_OPENAI_ENDPOINT",
+                "gcp": "GCP_BASE_URL",
+                "huggingface": "HUGGINGFACE_BASE_URL",
+                "anthropic": "ANTHROPIC_BASE_URL",
+                "aws": "AWS_BASE_URL",
+            }
+            env_url = url_map.get(backend)
+            if env_url:
+                os.environ[env_url] = base_url
+
+        # Rebuild config → backend → pool → orchestrator
+        try:
+            self.app.config = Config()
+            model_backend = create_model_backend(self.app.config)
+            agent_pool = AgentPool.from_single_backend(model_backend)
+            await agent_pool.async_init(self.app.mcp_registry)
+            self.app.orchestrator = Orchestrator(
+                config=self.app.config,
+                mcp_registry=self.app.mcp_registry,
+                agent_pool=agent_pool,
+                long_term_memory=self.app.long_term_memory,
+                research_depth="shallow",
+            )
+            self._refresh_current_label()
+            self.query_one("#sidebar-backend", Label).update(f"  Backend: {backend}")
+            self.query_one("#home-feedback", Label).update(
+                f"✔ Switched to {backend} / {model}"
+            )
+        except Exception as exc:
+            self.query_one("#home-feedback", Label).update(f"✘ Failed: {exc}")
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP Screen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MCPScreen(Screen):
+    """View and manage MCP servers."""
+
+    BINDINGS = [
+        Binding("escape", "go_back", "← Back"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._selected_server: Optional[str] = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="main-layout"):
+            with Vertical(id="sidebar"):
+                yield Label("🔌  MCP Servers", id="sidebar-title")
+                yield Label("Registered:", classes="sidebar-section")
+                # Populated on mount
+                yield Label(
+                    "  (loading…)",
+                    id="sidebar-mcp-loading",
+                    classes="sidebar-item pending",
+                )
+
+            with Vertical(id="content-area"):
+                yield Button("＋  Add Server", id="btn-mcp-show-add")
+                yield Button("✘  Remove Selected", id="btn-mcp-remove")
+
+                with ScrollableContainer(id="mcp-server-list"):
+                    yield RichLog(id="mcp-log", highlight=True, markup=True)
+
+                with ScrollableContainer(id="mcp-tools-panel"):
+                    yield Label("🔧  Tools", id="mcp-tools-title")
+                    yield RichLog(id="mcp-tools-log", highlight=True, markup=True)
+
+                with Vertical(id="mcp-add-form"):
+                    yield Label("Server name:", classes="mcp-label")
+                    yield Input(placeholder="my-server", id="mcp-input-name")
+                    yield Label(
+                        "Transport (streamable-http / sse / stdio):",
+                        classes="mcp-label",
+                    )
+                    yield Input(placeholder="streamable-http", id="mcp-input-transport")
+                    yield Label(
+                        "URL (for http/sse) or command (for stdio):",
+                        classes="mcp-label",
+                    )
+                    yield Input(
+                        placeholder="http://localhost:8080/mcp", id="mcp-input-url"
+                    )
+                    with Horizontal(id="mcp-add-actions"):
+                        yield Button("✔  Register", id="btn-mcp-add")
+
+                yield Label("", id="home-feedback")
+
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._refresh_servers()
+
+    def _refresh_servers(self) -> None:
+        servers = self.app.mcp_registry.get_all_server_info()
+
+        # Update sidebar
+        try:
+            self.query_one("#sidebar-mcp-loading").remove()
+        except NoMatches:
+            pass
+        sidebar = self.query_one("#sidebar", Vertical)
+        # Remove old dynamic labels
+        for child in list(sidebar.children):
+            if (
+                hasattr(child, "id")
+                and child.id
+                and child.id.startswith("sidebar-mcp-")
+            ):
+                child.remove()
+
+        for info in servers:
+            name = info["name"]
+            status = info.get("status", "unknown")
+            css_cls = "connected" if status == "connected" else "disconnected"
+            icon = "●" if status == "connected" else "○"
+            lbl = Label(
+                f"  {icon} {name}",
+                id=f"sidebar-mcp-{name}",
+                classes=f"sidebar-item mcp-server-entry {css_cls}",
+            )
+            sidebar.mount(lbl)
+
+        # Update main log
+        log = self.query_one("#mcp-log", RichLog)
+        log.clear()
+        if not servers:
+            log.write(Text("No MCP servers registered.", style="dim"))
+            return
+        for info in servers:
+            name = info["name"]
+            transport = info.get("transport", "?")
+            status = info.get("status", "unknown")
+            tools_count = info.get("tools_count", 0)
+            builtin = "builtin" if info.get("builtin") else "user"
+            url = info.get("url", info.get("command", ""))
+            style = "green" if status == "connected" else "red"
+            log.write(
+                Text(
+                    f"  {name}  [{transport}]  {url}  — {tools_count} tool(s)  ({status}, {builtin})",
+                    style=style,
+                )
+            )
+
+    def _show_tools_for(self, server_name: str) -> None:
+        tools_log = self.query_one("#mcp-tools-log", RichLog)
+        tools_log.clear()
+        specs = self.app.mcp_registry.tool_specs.get(server_name, [])
+        if not specs:
+            tools_log.write(Text(f"No tools for {server_name}.", style="dim"))
+            return
+        tools_log.write(Text(f"Tools for {server_name}:", style="bold cyan"))
+        for tool in specs:
+            name = tool.get("function", {}).get("name", tool.get("name", "?"))
+            desc = tool.get("function", {}).get(
+                "description", tool.get("description", "")
+            )
+            tools_log.write(Text(f"  • {name}", style="bold"))
+            if desc:
+                tools_log.write(Text(f"    {desc[:80]}", style="dim"))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+
+        if bid == "btn-mcp-show-add":
+            form = self.query_one("#mcp-add-form")
+            form.display = not form.display
+
+        elif bid == "btn-mcp-add":
+            self._register_server()
+
+        elif bid == "btn-mcp-remove":
+            self._remove_server()
+
+    @work(exclusive=True, thread=False)
+    async def _register_server(self) -> None:
+        name = self.query_one("#mcp-input-name", Input).value.strip()
+        transport = (
+            self.query_one("#mcp-input-transport", Input).value.strip()
+            or "streamable-http"
+        )
+        url_or_cmd = self.query_one("#mcp-input-url", Input).value.strip()
+        feedback = self.query_one("#home-feedback", Label)
+
+        if not name:
+            feedback.update("Please enter a server name.")
+            return
+        if not url_or_cmd:
+            feedback.update("Please enter a URL or command.")
+            return
+
+        if transport == "stdio":
+            parts = url_or_cmd.split()
+            cmd = parts[0]
+            args = parts[1:] if len(parts) > 1 else []
+            ok = await self.app.mcp_registry.register(
+                name, command=cmd, args=args, transport="stdio"
+            )
+        else:
+            ok = await self.app.mcp_registry.register(
+                name, url=url_or_cmd, transport=transport
+            )
+
+        if ok:
+            feedback.update(f"✔ Registered '{name}'")
+            self.query_one("#mcp-add-form").display = False
+            # Clear inputs
+            self.query_one("#mcp-input-name", Input).value = ""
+            self.query_one("#mcp-input-url", Input).value = ""
+        else:
+            feedback.update(f"✘ Failed to connect to '{name}' — stored as disconnected")
+
+        self._refresh_servers()
+
+    @work(exclusive=True, thread=False)
+    async def _remove_server(self) -> None:
+        feedback = self.query_one("#home-feedback", Label)
+        servers = self.app.mcp_registry.get_all_server_info()
+        # Remove the last non-builtin server (user should select in the future)
+        user_servers = [s for s in servers if not s.get("builtin")]
+        if not user_servers:
+            feedback.update("No user-added servers to remove.")
+            return
+        target = user_servers[-1]["name"]
+        await self.app.mcp_registry.unregister(target)
+        feedback.update(f"✔ Removed '{target}'")
+        self._refresh_servers()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sessions Screen
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Default sessions directory — must match session_store.py
+_SESSIONS_DIR = (
+    Path(os.getenv("LOG_DIR", str(Path(__file__).parent / "logs"))) / "sessions"
+)
+
+
+class SessionsScreen(Screen):
+    """Browse and resume past research sessions."""
+
+    BINDINGS = [
+        Binding("escape", "go_back", "← Back"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._session_ids: List[str] = []
+        self._selected_index: int = -1
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal(id="main-layout"):
+            with Vertical(id="sidebar"):
+                yield Label("📂  Sessions", id="sidebar-title")
+                yield Label("Recent sessions:", classes="sidebar-section")
+                yield Label(
+                    "  (loading…)",
+                    id="sidebar-sess-loading",
+                    classes="sidebar-item pending",
+                )
+
+            with Vertical(id="content-area"):
+                with Horizontal(id="sessions-actions"):
+                    yield Button("＋  New Session", id="btn-session-new")
+                    yield Button("▶  Resume Selected", id="btn-session-resume")
+
+                with ScrollableContainer(id="sessions-list"):
+                    yield RichLog(id="sessions-log", highlight=True, markup=True)
+
+                with ScrollableContainer(id="sessions-detail"):
+                    yield Label("Session Detail", id="sessions-detail-title")
+                    yield RichLog(id="sessions-detail-log", highlight=True, markup=True)
+
+                yield Label("", id="home-feedback")
+
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._load_sessions()
+
+    def _load_sessions(self) -> None:
+        """Scan disk checkpoints to list past sessions."""
+        self._session_ids = []
+        log = self.query_one("#sessions-log", RichLog)
+        log.clear()
+
+        try:
+            self.query_one("#sidebar-sess-loading").remove()
+        except NoMatches:
+            pass
+
+        sidebar = self.query_one("#sidebar", Vertical)
+        # Remove old dynamic labels
+        for child in list(sidebar.children):
+            if (
+                hasattr(child, "id")
+                and child.id
+                and child.id.startswith("sidebar-sess-")
+            ):
+                child.remove()
+
+        if not _SESSIONS_DIR.exists():
+            log.write(Text("No sessions found.", style="dim"))
+            return
+
+        # Collect checkpoint files
+        files = sorted(
+            _SESSIONS_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not files:
+            log.write(Text("No sessions found.", style="dim"))
+            return
+
+        for i, f in enumerate(files[:20]):  # Show last 20
+            sid = f.stem
+            self._session_ids.append(sid)
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                state = data.get("state", "unknown")
+                created = data.get("created_at", "?")[:19]
+                # Extract goal from replay log
+                goal = ""
+                for ev in data.get("replay_log", []):
+                    if ev.get("type") == "plan":
+                        plan_data = ev.get("plan", ev.get("data", {}).get("plan", {}))
+                        if isinstance(plan_data, dict):
+                            goal = plan_data.get("goal", "")[:50]
+                            break
+                    elif ev.get("type") == "status" and not goal:
+                        goal = ev.get("message", "")[:50]
+
+            except Exception:
+                state = "unknown"
+                created = "?"
+                goal = ""
+
+            state_css = {
+                "complete": "session-complete",
+                "executing": "session-active",
+                "error": "session-error",
+            }.get(state, "")
+            icon = {"complete": "✔", "error": "✘", "executing": "⏳"}.get(state, "○")
+
+            display = f"  {icon} [{i+1}] {sid[:12]}…  {state}  {created}"
+            if goal:
+                display += f"\n       {goal}"
+            log.write(Text(display, style="green" if state == "complete" else "dim"))
+
+            sidebar.mount(
+                Label(
+                    f"  {icon} {sid[:8]}…",
+                    id=f"sidebar-sess-{i}",
+                    classes=f"sidebar-item session-entry {state_css}",
+                )
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if bid == "btn-session-new":
+            self._new_session()
+        elif bid == "btn-session-resume":
+            self._resume_selected()
+
+    @work(exclusive=True, thread=False)
+    async def _new_session(self) -> None:
+        cfg = self.app.config
+        model_backend = create_model_backend(cfg)
+        agent_pool = AgentPool.from_single_backend(model_backend)
+        await agent_pool.async_init(self.app.mcp_registry)
+        self.app.orchestrator = Orchestrator(
+            config=cfg,
+            mcp_registry=self.app.mcp_registry,
+            agent_pool=agent_pool,
+            long_term_memory=self.app.long_term_memory,
+            research_depth="shallow",
+        )
+        self.query_one("#home-feedback", Label).update("✔ New session created.")
+        self.app.pop_screen()
+
+    def _resume_selected(self) -> None:
+        feedback = self.query_one("#home-feedback", Label)
+        if not self._session_ids:
+            feedback.update("No sessions available.")
+            return
+        # Resume the most recent session (first in list)
+        # Users can also type /sessions and use the numbered list
+        idx = max(self._selected_index, 0)
+        if idx >= len(self._session_ids):
+            feedback.update("Invalid selection.")
+            return
+        sid = self._session_ids[idx]
+        self._do_resume(sid)
+
+    @work(exclusive=True, thread=False)
+    async def _do_resume(self, session_id: str) -> None:
+        feedback = self.query_one("#home-feedback", Label)
+        checkpoint_file = _SESSIONS_DIR / f"{session_id}.json"
+        if not checkpoint_file.exists():
+            feedback.update(f"Checkpoint not found for {session_id}.")
+            return
+        try:
+            data = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+            feedback.update(f"Resuming session {session_id[:12]}…")
+            # Push a research screen and replay the log into it
+            screen = ResearchScreen(self.app.orchestrator, self.app.config)
+            self.app.push_screen(screen)
+            # Replay log entries into the research screen
+            self.app.call_after_refresh(
+                lambda: self._replay_log(screen, data.get("replay_log", []))
+            )
+        except Exception as exc:
+            feedback.update(f"✘ Failed to resume: {exc}")
+
+    @staticmethod
+    def _replay_log(screen: ResearchScreen, replay_log: list) -> None:
+        """Replay stored events into a ResearchScreen for visual continuity."""
+        try:
+            for event in replay_log:
+                t = event.get("type", "")
+                msg = event.get("message", "")
+                if t == "status":
+                    screen._log(f"[dim]{msg}[/dim]")
+                elif t == "plan":
+                    plan_data = event.get("plan", event.get("data", {}).get("plan", {}))
+                    if isinstance(plan_data, dict):
+                        goal = plan_data.get("goal", "")
+                        md_lines = [f"**Goal:** {goal}\n"]
+                        for s in plan_data.get("steps", []):
+                            md_lines.append(
+                                f"- **Step {s.get('id', '?')}:** {s.get('description', '')}"
+                            )
+                        try:
+                            screen.query_one("#plan-body", Static).update(
+                                "\n".join(md_lines)
+                            )
+                        except NoMatches:
+                            pass
+                elif t == "report":
+                    doc = event.get("data", {}).get("document", "")
+                    if doc:
+                        screen._show_report(doc)
+                elif t in ("step_complete", "step_start", "step_failed"):
+                    screen._log(f"[dim](replay) {msg}[/dim]")
+                elif t == "error":
+                    screen._log(f"[red]{msg}[/red]")
+        except Exception:
+            pass  # Screen may not be fully mounted
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Root Application
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1102,7 +2151,7 @@ class ResearchApp(App):
     """Root Textual application — holds shared state passed to all screens."""
 
     CSS = APP_CSS
-    TITLE = "Research Assistant"
+    TITLE = "Deep Research Agent"
     SUB_TITLE = "AI-powered multi-agent research"
 
     BINDINGS = [
@@ -1125,6 +2174,7 @@ class ResearchApp(App):
         self.long_term_memory = long_term_memory
         self._initial_mode = initial_mode
         self._initial_query = initial_query
+        self.session_store = SessionStore()
 
     def on_mount(self) -> None:
         if self._initial_mode == "research":
@@ -1143,7 +2193,7 @@ class ResearchApp(App):
                 )
             )
         else:
-            self.push_screen(ModePickerScreen())
+            self.push_screen(HomeScreen())
 
     @staticmethod
     def _auto_run_query(screen: ResearchScreen, query: str) -> None:
