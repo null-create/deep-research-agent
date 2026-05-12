@@ -72,6 +72,177 @@ from models import Message, ResearchPlan, ResearchStep, StepStatus
 from session_store import SessionStore
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Local Document Discovery
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# File extensions considered for local document scanning.
+_SUPPORTED_DOC_EXTENSIONS = frozenset(
+    {".pdf", ".docx", ".odt", ".txt", ".md", ".csv", ".json"}
+)
+
+
+def _extract_text_snippet(file_path: Path, max_chars: int = 500) -> str:
+    """
+    Extract a short text snippet from a file for relevance checking.
+
+    For plain-text formats, reads the first *max_chars* directly.
+    For binary formats (PDF, DOCX, ODT), attempts extraction via optional
+    libraries — falls back to empty string if unavailable.
+    """
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix in (".txt", ".md", ".csv", ".json"):
+            return file_path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+        elif suffix == ".pdf":
+            try:
+                import pypdf
+            except ImportError:
+                return ""
+            reader = pypdf.PdfReader(str(file_path))
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""
+                if len(text) >= max_chars:
+                    break
+            return text[:max_chars]
+        elif suffix == ".docx":
+            try:
+                import docx
+            except ImportError:
+                return ""
+            doc = docx.Document(str(file_path))
+            text = ""
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+                if len(text) >= max_chars:
+                    break
+            return text[:max_chars]
+        elif suffix == ".odt":
+            try:
+                from odf import text as odf_text, teletype
+                from odf.opendocument import load
+            except ImportError:
+                return ""
+            doc = load(str(file_path))
+            paragraphs = [
+                teletype.extractText(p) for p in doc.getElementsByType(odf_text.P)
+            ]
+            return "\n".join(paragraphs)[:max_chars]
+    except Exception:
+        return ""
+    return ""
+
+
+def _read_full_document(file_path: Path, max_chars: int = 10000) -> str:
+    """
+    Read the full text content of a document (up to *max_chars*).
+
+    Used after user approval to inject document content into the research
+    pipeline.
+    """
+    suffix = file_path.suffix.lower()
+    try:
+        if suffix in (".txt", ".md", ".csv", ".json"):
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        elif suffix == ".pdf":
+            try:
+                import pypdf
+            except ImportError:
+                return ""
+            reader = pypdf.PdfReader(str(file_path))
+            content = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+        elif suffix == ".docx":
+            try:
+                import docx
+            except ImportError:
+                return ""
+            doc = docx.Document(str(file_path))
+            content = "\n\n".join(
+                para.text for para in doc.paragraphs if para.text.strip()
+            )
+        elif suffix == ".odt":
+            try:
+                from odf import text as odf_text, teletype
+                from odf.opendocument import load
+            except ImportError:
+                return ""
+            doc = load(str(file_path))
+            paragraphs = [
+                teletype.extractText(p) for p in doc.getElementsByType(odf_text.P)
+            ]
+            content = "\n\n".join(p for p in paragraphs if p.strip())
+        else:
+            return ""
+    except Exception:
+        return ""
+
+    if len(content) > max_chars:
+        content = content[:max_chars] + "\n[truncated]"
+    return content
+
+
+def scan_local_documents(directory: str, query: str, max_files: int = 50) -> List[dict]:
+    """
+    Scan *directory* recursively for supported documents and return those
+    whose filename or content snippet is relevant to *query*.
+
+    Returns a list of dicts: {"path": str, "name": str, "size_bytes": int,
+    "match_reason": str}.
+    """
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        return []
+
+    # Tokenize query into lowercase keywords for matching
+    query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+    if not query_terms:
+        # No meaningful terms — return all supported files
+        query_terms = []
+
+    results: List[dict] = []
+    for file_path in root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in _SUPPORTED_DOC_EXTENSIONS:
+            continue
+        if len(results) >= max_files:
+            break
+
+        name_lower = file_path.stem.lower()
+        match_reasons: List[str] = []
+
+        # Check filename match
+        for term in query_terms:
+            if term in name_lower:
+                match_reasons.append(f"filename contains '{term}'")
+
+        # Check content snippet match (only if no filename match yet)
+        if not match_reasons and query_terms:
+            snippet = _extract_text_snippet(file_path)
+            snippet_lower = snippet.lower()
+            for term in query_terms:
+                if term in snippet_lower:
+                    match_reasons.append(f"content contains '{term}'")
+                    break  # one content match is enough
+
+        # If no query terms provided, include all files
+        if not query_terms:
+            match_reasons.append("supported document type")
+
+        if match_reasons:
+            results.append(
+                {
+                    "path": str(file_path),
+                    "name": file_path.name,
+                    "size_bytes": file_path.stat().st_size,
+                    "match_reason": "; ".join(match_reasons),
+                }
+            )
+
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CSS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -310,6 +481,40 @@ Screen {
     width: 26;
     background: $error;
     margin-bottom: 1;
+}
+
+/* ── Local Documents Approval ────────────────────────────────────── */
+#docs-panel {
+    height: auto;
+    max-height: 12;
+    border: round $warning;
+    padding: 1;
+    margin-bottom: 1;
+    display: none;
+}
+
+#docs-panel-title {
+    text-style: bold;
+    color: $warning;
+    margin-bottom: 1;
+}
+
+#docs-actions {
+    layout: horizontal;
+    height: 3;
+    margin-bottom: 1;
+    display: none;
+}
+
+#btn-approve-docs {
+    width: 18;
+    background: $success;
+    margin-right: 1;
+}
+
+#btn-deny-docs {
+    width: 18;
+    background: $error;
 }
 
 /* ── Sessions Screen ─────────────────────────────────────────────── */
@@ -558,6 +763,7 @@ _COMMAND_HELP = """\
   [bold cyan]/research[/] [dim]<query>[/dim]  — Deep multi-agent investigation
   [bold cyan]/chat[/]                — Interactive Q&A with the agent
   [bold cyan]/optimize[/]            — Analyse memories & evolve methods
+  [bold cyan]/docs[/] [dim]<path>[/dim]       — Set local documents directory
   [bold cyan]/models[/]              — View / change the model backend
   [bold cyan]/mcp[/]                 — View / manage MCP servers
   [bold cyan]/sessions[/]            — Browse & resume past sessions
@@ -615,7 +821,11 @@ class HomeScreen(Screen):
         }
         model = model_env_map.get(backend, "unknown")
         n_servers = len(self.app.mcp_registry.server_configs)
-        return f"Backend: {backend}  |  Model: {model}  |  MCP servers: {n_servers}"
+        docs_dir = self.app.docs_dir
+        status = f"Backend: {backend}  |  Model: {model}  |  MCP servers: {n_servers}"
+        if docs_dir:
+            status += f"  |  Docs: {Path(docs_dir).name}/"
+        return status
 
     def _show_feedback(self, text: str) -> None:
         self.query_one("#home-feedback", Label).update(text)
@@ -629,6 +839,7 @@ class HomeScreen(Screen):
         ("/research", "Deep multi-agent investigation"),
         ("/chat", "Interactive Q&A with the agent"),
         ("/optimize", "Analyse memories & evolve methods"),
+        ("/docs", "Set local documents directory"),
         ("/models", "View / change the model backend"),
         ("/mcp", "View / manage MCP servers"),
         ("/sessions", "Browse & resume past sessions"),
@@ -690,6 +901,7 @@ class HomeScreen(Screen):
             "/research": lambda: self._open_research(arg),
             "/chat": lambda: self._open_chat(),
             "/optimize": lambda: self._open_optimize(),
+            "/docs": lambda: self._set_docs_dir(arg),
             "/models": lambda: self._open_models(),
             "/mcp": lambda: self._open_mcp(),
             "/sessions": lambda: self._open_sessions(),
@@ -705,6 +917,18 @@ class HomeScreen(Screen):
     def _show_help(self) -> None:
         self._show_feedback("")
         self.query_one("#home-commands", Static).update(_COMMAND_HELP)
+
+    def _set_docs_dir(self, path: str = "") -> None:
+        if not path:
+            current = self.app.docs_dir or "(not set)"
+            self._show_feedback(f"Current docs dir: {current}. Usage: /docs <path>")
+            return
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_dir():
+            self._show_feedback(f"Not a valid directory: {resolved}")
+            return
+        self.app.docs_dir = str(resolved)
+        self._show_feedback(f"✔ Docs directory set: {resolved}")
 
     def _open_research(self, query: str = "") -> None:
         screen = ResearchScreen(self.app.orchestrator, self.app.config)
@@ -803,6 +1027,10 @@ class ResearchScreen(Screen):
         self._report: str = ""
         self._step_widgets: dict[int, Label] = {}
         self._busy = False
+        # Local document discovery state
+        self._discovered_docs: List[dict] = []
+        self._docs_approved: Optional[bool] = None
+        self._docs_event: Optional[asyncio.Event] = None
 
     # ── Layout ───────────────────────────────────────────────────────────────
 
@@ -823,6 +1051,14 @@ class ResearchScreen(Screen):
                         placeholder="Enter your research query…", id="query-input"
                     )
                     yield Button("▶  Research", id="btn-run-research")
+
+                with ScrollableContainer(id="docs-panel"):
+                    yield Label("📂 Local Documents Found", id="docs-panel-title")
+                    yield Static("", id="docs-body")
+
+                with Horizontal(id="docs-actions"):
+                    yield Button("✔  Use Documents", id="btn-approve-docs")
+                    yield Button("✘  Skip", id="btn-deny-docs")
 
                 with ScrollableContainer(id="plan-panel"):
                     yield Label("Research Plan", id="plan-panel-title")
@@ -969,6 +1205,28 @@ class ResearchScreen(Screen):
         self._show_plan_actions(False)
         self._run_deny_plan()
 
+    @on(Button.Pressed, "#btn-approve-docs")
+    def handle_approve_docs(self) -> None:
+        self._docs_approved = True
+        self._show_docs_panel(False)
+        self._log(
+            "[bold green]✔ Local documents approved — will include in research.[/bold green]"
+        )
+        if self._docs_event:
+            self._docs_event.set()
+
+    @on(Button.Pressed, "#btn-deny-docs")
+    def handle_deny_docs(self) -> None:
+        self._docs_approved = False
+        self._show_docs_panel(False)
+        self._log("[dim]Local documents skipped.[/dim]")
+        if self._docs_event:
+            self._docs_event.set()
+
+    def _show_docs_panel(self, visible: bool) -> None:
+        self.query_one("#docs-panel").display = visible
+        self.query_one("#docs-actions").display = visible
+
     # ── Workers ───────────────────────────────────────────────────────────────
 
     @work(exclusive=True, thread=False)
@@ -976,8 +1234,57 @@ class ResearchScreen(Screen):
         self._log(f"[bold blue]🔍 Research query:[/bold blue] {query}")
         self._set_progress(5)
 
+        # ── Local document discovery ──────────────────────────────────────
+        local_documents: Optional[List[dict]] = None
+        docs_dir = getattr(self.app, "docs_dir", None)
+        if docs_dir:
+            self._log(f"[dim]Scanning local documents in {docs_dir}…[/dim]")
+            max_files = self.config.max_local_docs
+            discovered = scan_local_documents(docs_dir, query, max_files=max_files)
+
+            if discovered:
+                self._discovered_docs = discovered
+                # Show discovered documents to user
+                lines = [f"Found **{len(discovered)}** relevant document(s):\n"]
+                for doc in discovered[:20]:  # Show at most 20 in the panel
+                    size_kb = doc["size_bytes"] / 1024
+                    lines.append(
+                        f"  • {doc['name']} ({size_kb:.1f} KB) — {doc['match_reason']}"
+                    )
+                if len(discovered) > 20:
+                    lines.append(f"  … and {len(discovered) - 20} more")
+                lines.append("\nAllow the agent to read and use these during research?")
+                self.query_one("#docs-body", Static).update("\n".join(lines))
+                self._show_docs_panel(True)
+
+                # Wait for user response
+                self._docs_event = asyncio.Event()
+                self._docs_approved = None
+                await self._docs_event.wait()
+                self._docs_event = None
+
+                if self._docs_approved:
+                    # Read full contents of approved documents
+                    max_chars = self.config.max_local_doc_chars
+                    local_documents = []
+                    for doc_info in discovered:
+                        content = _read_full_document(
+                            Path(doc_info["path"]), max_chars=max_chars
+                        )
+                        if content.strip():
+                            local_documents.append(
+                                {"name": doc_info["name"], "content": content}
+                            )
+                    self._log(
+                        f"[green]Loaded {len(local_documents)} document(s) as context.[/green]"
+                    )
+            else:
+                self._log("[dim]No relevant local documents found.[/dim]")
+
         try:
-            async for msg in self.orchestrator.plan(query):
+            async for msg in self.orchestrator.plan(
+                query, local_documents=local_documents
+            ):
                 if msg.type == "status":
                     self._log(f"[dim]{msg.message}[/dim]")
 
@@ -2166,6 +2473,7 @@ class ResearchApp(App):
         long_term_memory: Optional[AsyncLongTermMemory] = None,
         initial_mode: Optional[str] = None,
         initial_query: Optional[str] = None,
+        docs_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.orchestrator = orchestrator
@@ -2174,6 +2482,7 @@ class ResearchApp(App):
         self.long_term_memory = long_term_memory
         self._initial_mode = initial_mode
         self._initial_query = initial_query
+        self.docs_dir: Optional[str] = docs_dir
         self.session_store = SessionStore()
 
     def on_mount(self) -> None:
@@ -2284,6 +2593,10 @@ Examples:
         default="shallow",
         help="Research depth (default: shallow)",
     )
+    parser.add_argument(
+        "--docs-dir",
+        help="Local directory to scan for relevant documents",
+    )
 
     args = parser.parse_args()
 
@@ -2312,6 +2625,21 @@ Examples:
 
     initial_query = " ".join(args.query) if args.query else None
 
+    # Resolve docs directory: CLI arg takes precedence over config/env var
+    docs_dir = args.docs_dir
+    if docs_dir:
+        resolved = Path(docs_dir).expanduser().resolve()
+        if not resolved.is_dir():
+            print(
+                f"[WARNING] --docs-dir path is not a valid directory: {resolved}",
+                file=sys.stderr,
+            )
+            docs_dir = None
+        else:
+            docs_dir = str(resolved)
+    elif config.docs_dir:
+        docs_dir = config.docs_dir
+
     app = ResearchApp(
         orchestrator=orchestrator,
         config=config,
@@ -2319,6 +2647,7 @@ Examples:
         long_term_memory=long_term_memory,
         initial_mode=args.mode,
         initial_query=initial_query,
+        docs_dir=docs_dir,
     )
     app.run()
 
