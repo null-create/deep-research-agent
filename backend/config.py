@@ -215,6 +215,25 @@ class Config(BaseModel):
         default_factory=lambda: int(os.getenv("GRAPH_COMMUNITY_MIN_MUTATIONS", "3"))
     )
 
+    # ───────── Local Document Discovery
+
+    # Default directory to scan for local documents relevant to a research query.
+    # When set, the CLI will offer to include matching files as primary sources.
+    # Can be overridden at runtime with --docs-dir.
+    docs_dir: Optional[str] = Field(
+        default_factory=lambda: os.getenv("DOCS_DIR") or None
+    )
+
+    # Maximum number of local documents to consider during discovery.
+    max_local_docs: int = Field(
+        default_factory=lambda: int(os.getenv("MAX_LOCAL_DOCS", "50"))
+    )
+
+    # Maximum characters to read per local document for content injection.
+    max_local_doc_chars: int = Field(
+        default_factory=lambda: int(os.getenv("MAX_LOCAL_DOC_CHARS", "10000"))
+    )
+
     # ───────── MCP Servers
     # Each MCP server exposes tools over the Model Context Protocol.  The URL
     # must point to the server's /mcp endpoint.  Optional API keys are forwarded

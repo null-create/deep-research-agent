@@ -10,9 +10,10 @@
    - [Options](#options)
    - [Research Depth](#research-depth)
    - [Backend & Model Overrides](#backend--model-overrides)
-5. [Mode Picker](#mode-picker)
+5. [Home Screen & Slash Commands](#home-screen--slash-commands)
 6. [Research Mode](#research-mode)
    - [Layout](#research-layout)
+   - [Local Document Discovery](#local-document-discovery)
    - [Plan Review Workflow](#plan-review-workflow)
    - [Agent Log Colours](#agent-log-colours)
    - [Progress Bar](#progress-bar)
@@ -86,7 +87,7 @@ pip install -r backend/requirements.txt
 ```bash
 # From the backend/ directory
 
-# Open the mode picker
+# Open the home screen (slash-command interface)
 python cli.py
 
 # Jump straight to a mode
@@ -104,6 +105,10 @@ python cli.py research --depth deep "Detailed analysis of quantum computing"
 # Override the model backend at launch
 python cli.py research --backend ollama --model llama3.2
 python cli.py chat --backend openai --model gpt-4o
+
+# Scan a local directory for relevant documents during research
+python cli.py research --docs-dir ./my-papers "survey of transformer architectures"
+python cli.py research --docs-dir ~/Documents/research-data
 ```
 
 ---
@@ -111,7 +116,7 @@ python cli.py chat --backend openai --model gpt-4o
 ## Invocation & Arguments
 
 ```
-python cli.py [mode] [query ...] [--backend BACKEND] [--model MODEL] [--depth DEPTH]
+python cli.py [mode] [query ...] [--backend BACKEND] [--model MODEL] [--depth DEPTH] [--docs-dir PATH]
 ```
 
 ### Positional Arguments
@@ -128,6 +133,7 @@ python cli.py [mode] [query ...] [--backend BACKEND] [--model MODEL] [--depth DE
 | `--backend` | Override the model backend. Choices: `openai`, `ollama`, `bedrock`, `azure`, `huggingface`, `gcp`. |
 | `--model` | Override the specific model name within the chosen backend. |
 | `--depth` | Research depth. Choices: `shallow` (default), `moderate`, `deep`. Controls whether the QA loop runs and how many retries it gets. See [Research Depth](#research-depth) below. |
+| `--docs-dir` | Path to a local directory to scan for relevant documents. When set, the CLI discovers matching files and asks for your permission before including them in the research pipeline. See [Local Document Discovery](#local-document-discovery). |
 | `-h`, `--help` | Print the help message and exit. |
 
 ### Research Depth
@@ -157,11 +163,28 @@ The mapping of `--backend` to environment variable:
 
 ---
 
-## Mode Picker
+## Home Screen & Slash Commands
 
-The mode picker is the default landing screen. It presents three buttons (also reachable via keyboard shortcuts `1`, `2`, `3`) and requires no model interaction — it is purely navigational.
+The home screen is the default landing screen. It displays an ASCII banner, status line (showing active backend, model, MCP server count, and docs directory if set), and an input field for slash commands.
 
-**Key bindings on the mode picker:**
+**Available slash commands:**
+
+| Command | Description |
+|---|---|
+| `/research <query>` | Open Research mode, optionally with a pre-filled query |
+| `/chat` | Open Chat mode |
+| `/optimize` | Open Self-Optimize mode |
+| `/docs <path>` | Set or change the local documents directory for research |
+| `/models` | View / change the model backend |
+| `/mcp` | View / manage MCP servers |
+| `/sessions` | Browse & resume past sessions |
+| `/new` | Start a fresh session (resets orchestrator state) |
+| `/help` | Show the command list |
+| `/exit` | Quit the application |
+
+The input field provides **autocomplete** — as you type a `/` prefix, a dropdown shows matching commands.
+
+**Key bindings on the home screen:**
 
 | Key | Action |
 |---|---|
@@ -170,6 +193,20 @@ The mode picker is the default landing screen. It presents three buttons (also r
 | `3` | Open Self-Optimize mode |
 | `q` | Quit the application |
 
+### The `/docs` Command
+
+Use `/docs <path>` to set a local directory that will be scanned for relevant documents whenever you start a research run. The path can be absolute or relative (supports `~` expansion).
+
+```
+/docs ~/Documents/research-papers
+/docs ./data/references
+/docs                              # shows the currently set directory
+```
+
+When a docs directory is active, the status line at the top of the home screen shows the directory name. The setting persists for the duration of the CLI session.
+
+You can also set this via the `--docs-dir` CLI argument or the `DOCS_DIR` environment variable (in `.env` or exported).
+
 ---
 
 ## Research Mode
@@ -177,7 +214,7 @@ The mode picker is the default landing screen. It presents three buttons (also r
 Research mode runs the full **Orchestrator** pipeline:
 
 ```
-Query → plan() → [Approve / Modify / Deny] → execute() → synthesise() → Report
+Query → [Document Discovery → Permission] → plan() → [Approve / Modify / Deny] → execute() → synthesise() → Report
 ```
 
 ### Research Layout
@@ -186,22 +223,30 @@ Query → plan() → [Approve / Modify / Deny] → execute() → synthesise() �
 ┌─────────────────────┬──────────────────────────────────────────┐
 │  📋 Research Plan   │  [ query input field       ] [▶ Research]│
 │                     │                                           │
-│  Goal: …            │  ┌─ Research Plan ─────────────────────┐ │
-│  Steps:             │  │  Goal: …                            │ │
-│    1. … (pending)   │  │  - Step 1: …                        │ │
-│    2. … (active)    │  │  - Step 2: …                        │ │
-│    3. … (done ✓)    │  └─────────────────────────────────────┘ │
+│  Goal: …            │  ┌─ 📂 Local Documents Found ──────────┐ │
+│  Steps:             │  │  Found 3 relevant document(s):      │ │
+│    1. … (pending)   │  │  • paper.pdf (245.3 KB) — filename  │ │
+│    2. … (active)    │  │    contains 'transformer'           │ │
+│    3. … (done ✓)    │  │  • notes.md (12.1 KB) — content     │ │
+│                     │  │    contains 'attention'              │ │
+│                     │  └──────────────────────────────────────┘ │
+│                     │  [✔ Use Documents] [✘ Skip]              │
+│                     │                                           │
+│                     │  ┌─ Research Plan ─────────────────────┐ │
+│                     │  │  Goal: …                            │ │
+│                     │  │  - Step 1: …                        │ │
+│                     │  │  - Step 2: …                        │ │
+│                     │  └─────────────────────────────────────┘ │
 │                     │                                           │
 │                     │  [✔ Approve] [✏ Modify] [✘ Deny]         │
 │                     │                                           │
 │                     │  ████████████░░░░  65%                   │
 │                     │                                           │
 │                     │  ┌─ Agent Log ─────────────────────────┐ │
+│                     │  │  [dim] Scanning local documents…    │ │
+│                     │  │  [green] Loaded 3 document(s)…      │ │
 │                     │  │  [dim] Orchestrator: analysing…     │ │
 │                     │  │  [cyan] [Search] Gathering data…    │ │
-│                     │  │  [blue] [Analyst] Extracting…       │ │
-│                     │  │  [yellow] [QA] Auditing…            │ │
-│                     │  │  [green] ✔ Step 1 complete          │ │
 │                     │  └─────────────────────────────────────┘ │
 │                     │                                           │
 │                     │  ┌─ 📄 Research Report ────────────────┐ │
@@ -212,11 +257,48 @@ Query → plan() → [Approve / Modify / Deny] → execute() → synthesise() �
 ```
 
 - **Left sidebar** — live plan step tracker; each step label updates its colour as the pipeline progresses.
+- **Documents panel** — appears only when a docs directory is set and relevant files are found. Shows matched files with sizes and match reasons. Hidden again after the user responds.
 - **Plan panel** — shows the goal and step list as formatted text; updated in-place when the plan is modified.
 - **Action bar** — only visible after a plan is generated or after a modification.
 - **Progress bar** — hidden until research starts; updates at key milestones.
 - **Agent log** — scrollable, colour-coded stream of all agent activity.
 - **Report panel** — hidden until synthesis is complete; renders the final Markdown report inline.
+
+### Local Document Discovery
+
+When a docs directory is configured (via `--docs-dir`, `/docs`, or the `DOCS_DIR` environment variable), the CLI automatically scans it before generating a research plan. The workflow is:
+
+1. **Scan** — Recursively walks the directory for supported file types (`.pdf`, `.docx`, `.odt`, `.txt`, `.md`, `.csv`, `.json`), up to a configurable cap (default: 50 files, controlled by `MAX_LOCAL_DOCS`).
+
+2. **Relevance filter** — Matches query keywords against filenames and the first ~500 characters of file content. Only files with at least one keyword match are shown. If the query has no meaningful terms (< 3 chars per word), all supported files are included.
+
+3. **Permission prompt** — Displays the discovered documents in a panel with:
+   - File name and size
+   - Match reason (e.g., "filename contains 'quantum'" or "content contains 'entanglement'")
+   - Two action buttons: **✔ Use Documents** and **✘ Skip**
+
+4. **Content injection** — If approved, full file contents are read (up to `MAX_LOCAL_DOC_CHARS` per file, default: 10,000) and passed to `Orchestrator.plan()`. The orchestrator injects them into the planning prompt as "Local reference documents" — treated as primary sources that the agent avoids re-researching.
+
+5. **Skip** — If denied, research proceeds normally without local document context.
+
+**Supported file types and extraction:**
+
+| Extension | Extraction method |
+|---|---|
+| `.txt`, `.md`, `.csv`, `.json` | Direct UTF-8 read |
+| `.pdf` | `pypdf` page-by-page text extraction |
+| `.docx` | `python-docx` paragraph extraction |
+| `.odt` | `odfpy` paragraph extraction |
+
+> **Note:** PDF/DOCX/ODT extraction requires the corresponding Python libraries (`pypdf`, `python-docx`, `odfpy`). If a library is not installed, files of that type are silently skipped during scanning. These are already in `requirements.txt`.
+
+**Configuration options:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOCS_DIR` | (unset) | Default directory to scan. Overridden by `--docs-dir` or `/docs`. |
+| `MAX_LOCAL_DOCS` | 50 | Maximum number of files to discover per scan. |
+| `MAX_LOCAL_DOC_CHARS` | 10000 | Maximum characters read per document for injection. |
 
 ### Plan Review Workflow
 
@@ -405,7 +487,7 @@ Both sections are rendered as Markdown. If the agent has no stored memories yet 
 When `cli.py` is invoked, the `main()` function runs the following setup *before* the TUI launches:
 
 ```
-main()  (--depth passed as research_depth)
+main()  (--depth passed as research_depth, --docs-dir resolved)
   └── asyncio.run(_bootstrap(research_depth))
         ├── Config()                                  # reads .env + env vars
         ├── create_mcp_registry(config)               # connects to MCP servers (best-effort)
@@ -418,9 +500,13 @@ main()  (--depth passed as research_depth)
                          agent_pool=agent_pool,
                          long_term_memory=ltm,
                          research_depth=research_depth)
+  └── Resolve docs_dir (--docs-dir > Config.docs_dir > None)
+  └── ResearchApp(orchestrator, config, mcp_registry, # TUI application
+                  long_term_memory, initial_mode,
+                  initial_query, docs_dir)
 ```
 
-All four objects (`orchestrator`, `config`, `mcp_registry`, `long_term_memory`) are passed into `ResearchApp` and shared across screens via `self.app.*`. `SelfOptimizeScreen` receives `long_term_memory` directly so it can pass it to its `SelfOptimizingAgent` instance.
+All four objects (`orchestrator`, `config`, `mcp_registry`, `long_term_memory`) are passed into `ResearchApp` and shared across screens via `self.app.*`. The `docs_dir` is stored on `self.app.docs_dir` and can be changed at runtime via the `/docs` slash command. `SelfOptimizeScreen` receives `long_term_memory` directly so it can pass it to its `SelfOptimizingAgent` instance.
 
 MCP server connections are attempted at startup but failures are non-fatal — the CLI will start even if MCP servers are offline, though features that depend on them (web search, file handling, memory) will not work until the servers are available.
 
