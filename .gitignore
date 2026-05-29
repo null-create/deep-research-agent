@@ -32,3 +32,4 @@ backend/logs/sessions/*.json
 data/reports/*
 data/benchmarks/*
 data/documents/*
+data/neo4j_data/*
