@@ -868,7 +868,14 @@ class Orchestrator:
                 "\n\nRelevant prior research context (from long-term memory — "
                 "use to avoid re-investigating already-covered ground):\n"
                 + prior_memories
+                + "\n\n"
             )
+
+        # Inject the current date to aid root agent with its temporal reasoning and source evaluation
+        # (e.g. "if your training cutoff is in 2021 but today's date is 2024, you should prioritize
+        #  current sources and be skeptical of outdated info in your training data").
+        current_time = datetime.now(timezone.utc).today().strftime("%m:%d:%Y")
+        plan_prompt += f"\n\nCurrent date: {current_time}\n\n"
 
         root_messages = [
             Message(role="system", content=self._root_system_prompt()),
