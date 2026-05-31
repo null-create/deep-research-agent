@@ -13,7 +13,7 @@ import { useConversationGraphs, SYNTHESIS_NODE_ID } from './hooks/useConversatio
 import { DocsViewer } from './components/DocsViewer';
 import { apiClient } from './api/client';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:9999/ws/research';
+const WS_URL = import.meta.env.VITE_WS_URL || `${location.protocol.replace('http', 'ws')}//${location.host}/ws/research`;
 
 // sessionStorage keys — tab-scoped, cleared on browser close.
 const SS_SESSION_ID = 'deep_research_session_id';
