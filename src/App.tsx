@@ -931,7 +931,7 @@ const AppContent: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
               </button>
-              <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
+              <h1 className="text-lg font-semibold text-gray-900 dark:text-white truncate min-w-0">
                 Deep Research Agent
               </h1>
             </div>
@@ -953,10 +953,10 @@ const AppContent: React.FC = () => {
                   </svg>
                 )}
               </button>
-              {/* Docs button */}
+              {/* Docs button - hidden on mobile */}
               <button
                 onClick={() => setShowDocs(true)}
-                className="px-3 py-1 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                className="hidden sm:block px-3 py-1 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                 title="View documentation"
               >
                 Docs
@@ -993,7 +993,7 @@ const AppContent: React.FC = () => {
                       : 'bg-red-500'
                     }`}
                 />
-                <span className="text-xs text-gray-500 dark:text-gray-400">
+                <span className="hidden sm:inline text-xs text-gray-500 dark:text-gray-400">
                   {isConnected
                     ? 'Connected'
                     : isReconnecting
