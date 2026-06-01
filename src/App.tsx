@@ -935,7 +935,7 @@ const AppContent: React.FC = () => {
                 Deep Research Agent
               </h1>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 sm:gap-4">
               <button
                 onClick={toggleTheme}
                 className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
@@ -961,30 +961,34 @@ const AppContent: React.FC = () => {
               >
                 Docs
               </button>
-              {/* Chat / Graph view toggle */}
-              <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+              {/* Chat / Graph view toggle - compact on mobile */}
+              <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5 gap-0.5">
                 <button
                   onClick={() => setActiveView('chat')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeView === 'chat'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                    activeView === 'chat'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
                   title="Switch to Chat view"
                 >
-                  Chat
+                  <span className="hidden sm:inline">Chat</span>
+                  <span className="sm:hidden">💬</span>
                 </button>
                 <button
                   onClick={() => setActiveView('graph')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeView === 'graph'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                    activeView === 'graph'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
                   title="Switch to Execution Graph view"
                 >
-                  Graph
+                  <span className="hidden sm:inline">Graph</span>
+                  <span className="sm:hidden">📊</span>
                 </button>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 sm:gap-2">
                 <div
                   className={`w-2 h-2 rounded-full ${isConnected
                     ? 'bg-green-500'
