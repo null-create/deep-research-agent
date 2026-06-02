@@ -30,6 +30,9 @@ interface AppContextType {
   setPendingPlan: React.Dispatch<React.SetStateAction<any | null>>;
   planStatus: string;
   setPlanStatus: React.Dispatch<React.SetStateAction<string>>;
+  // Event index tracking (for accurate replay after browser close)
+  setEventIndex: (convId: string, index: number) => void;
+  getEventIndex: (convId: string) => number;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -46,6 +49,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateMessageInConversation,
     patchMessageInConversation,
     getActiveConversation,
+    setEventIndex,
+    getEventIndex,
   } = useConversations();
 
   const addMessageToConv = useCallback(
@@ -125,14 +130,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [createConversation]);
 
   useEffect(() => {
-    const savedResearching = sessionStorage.getItem('deep_research_is_researching');
+    const savedResearching = localStorage.getItem('deep_research_is_researching');
     if (savedResearching === 'true') {
       setIsResearching(true);
     }
   }, []);
 
   useEffect(() => {
-    sessionStorage.setItem('deep_research_is_researching', String(isResearching));
+    localStorage.setItem('deep_research_is_researching', String(isResearching));
   }, [isResearching]);
 
   return (
@@ -159,6 +164,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setPendingPlan,
         planStatus,
         setPlanStatus,
+        setEventIndex,
+        getEventIndex,
       }}
     >
       {children}
