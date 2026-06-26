@@ -59,6 +59,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder={inputMode === 'research' ? 'Ask me to research something...' : 'Chat with the agent...'}
+          aria-label={inputMode === 'research' ? 'Research query' : 'Chat message'}
           disabled={disabled}
           className="flex-1 px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-600 
                    bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100

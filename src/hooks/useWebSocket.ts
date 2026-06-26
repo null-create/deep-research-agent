@@ -13,8 +13,10 @@ interface UseWebSocketOptions {
 
 export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   const [isConnected, setIsConnected] = useState(false);
-  const [messageQueue, setMessageQueue] = useState<any[]>([]);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  // Use a ref-backed queue so drain is atomic (no snapshot-vs-clear race).
+  const messageBufferRef = useRef<any[]>([]);
+  const [, setQueueVersion] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -63,11 +65,15 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
       intentionalCloseRef.current = true;
       wsRef.current.close();
     }
+    // Note: intentionalCloseRef is reset to false in ws.onopen (below) once
+    // the replacement socket successfully connects, avoiding the race where
+    // the old socket's async onclose fires AFTER we reset the flag here.
 
-    intentionalCloseRef.current = false;
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
+      // Reset intentional-close flag now that the new connection is established.
+      intentionalCloseRef.current = false;
       setIsConnected(true);
       setIsReconnecting(false);
       reconnectAttemptsRef.current = 0;
@@ -90,10 +96,11 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setMessageQueue((prev) => [...prev, data]);
+        messageBufferRef.current.push(data);
       } catch {
-        setMessageQueue((prev) => [...prev, event.data]);
+        messageBufferRef.current.push(event.data);
       }
+      setQueueVersion((v) => v + 1);
     };
 
     ws.onclose = () => {
@@ -127,7 +134,10 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
     }
   }, []);
 
-  const clearMessageQueue = useCallback(() => setMessageQueue([]), []);
+  /** Atomically returns all queued messages and clears the buffer. */
+  const drainMessageQueue = useCallback((): any[] => {
+    return messageBufferRef.current.splice(0);
+  }, []);
 
   useEffect(() => {
     connect();
@@ -140,5 +150,5 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
     };
   }, [connect]);
 
-  return { isConnected, isReconnecting, messageQueue, clearMessageQueue, sendMessage, reconnect };
+  return { isConnected, isReconnecting, drainMessageQueue, sendMessage, reconnect };
 }

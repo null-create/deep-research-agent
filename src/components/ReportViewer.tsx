@@ -12,6 +12,15 @@ interface ReportViewerProps {
 export const ReportViewer: React.FC<ReportViewerProps> = ({ synthesis, onClose }) => {
   const reportRef = useRef<HTMLDivElement>(null);
 
+  /** Escape characters that are significant in HTML to prevent injection. */
+  const escapeHtml = (str: string) =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
   // ── Print-to-PDF ──────────────────────────────────────────────────────────
   const handleDownload = () => {
     const printContent = reportRef.current?.innerHTML;
@@ -20,12 +29,14 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({ synthesis, onClose }
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
 
+    const safeTitle = escapeHtml(synthesis.title || 'Research Report');
+
     printWindow.document.write(`
       <!DOCTYPE html>
       <html lang="en">
         <head>
           <meta charset="UTF-8" />
-          <title>${synthesis.title || 'Research Report'}</title>
+          <title>${safeTitle}</title>
           <style>
             /* ── Reset ── */
             *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -105,7 +116,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({ synthesis, onClose }
         </head>
         <body>
           <div class="report-header">
-            <h1>${synthesis.title || 'Research Report'}</h1>
+            <h1>${safeTitle}</h1>
             <p class="report-meta">
               Generated: ${synthesis.generatedAt
         ? new Date(synthesis.generatedAt).toLocaleString()
@@ -132,7 +143,11 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({ synthesis, onClose }
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4
                  bg-black/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={synthesis.title || 'Research Report'}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
     >
       {/* ── Modal shell ── */}
       <div
@@ -185,7 +200,7 @@ export const ReportViewer: React.FC<ReportViewerProps> = ({ synthesis, onClose }
                        prose prose-sm dark:prose-invert max-w-none"
           >
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {synthesis.content}
+              {synthesis.content ?? ''}
             </ReactMarkdown>
           </div>
         </div>

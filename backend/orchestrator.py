@@ -399,7 +399,6 @@ Return a JSON object:
     {
       "claim": "...",
       "sources": ["url1", "url2"],
-      "corroborated": true | false,
       "confidence": "corroborated" | "partially_corroborated" | "single_source"
     },
     ...
@@ -810,6 +809,11 @@ class Orchestrator:
         # Forwarded to subsequent SearchAgent calls so search focus can be
         # refined based on gaps identified by prior steps' analysts.
         self._analyst_recommendations: List[Dict[str, Any]] = []
+        # Long-term memory recalled once per execution batch and shared across
+        # that batch's (possibly parallel) steps so every Search/Analyst agent
+        # can build on prior-session knowledge without paying the recall cost
+        # per step.  Refreshed at the start of each batch in execute().
+        self._batch_memory: str = ""
         # Internal registry of live parallel-worker tasks so they can be
         # canceled atomically when the outer session task is canceled.
         self._active_tasks: List[asyncio.Task] = []
@@ -825,12 +829,26 @@ class Orchestrator:
     # minimal changes.
     # ------------------------------------------------------------------
 
-    async def plan(self, query: str) -> AsyncIterator[ResponseMessage]:
+    async def plan(
+        self,
+        query: str,
+        local_documents: Optional[List[Dict[str, str]]] = None,
+    ) -> AsyncIterator[ResponseMessage]:
         """
         Phase 1: analyse the query and emit a ``ResearchPlan``.
 
         Yields ``ResponseMessage`` events; the final event carries
         ``type="plan"`` with the plan dict in ``plan``.
+
+        Parameters
+        ----------
+        query:
+            The user's research question.
+        local_documents:
+            Optional list of dicts with ``"name"`` and ``"content"`` keys
+            representing locally discovered documents to treat as primary
+            source material.  When provided, their text is injected into
+            the planning prompt so the root agent can incorporate them.
         """
         self._reset_state()
 
@@ -871,6 +889,27 @@ class Orchestrator:
                 + "\n\n"
             )
 
+        # Inject locally-discovered documents provided by the user so the root
+        # agent can treat them as primary sources and avoid redundant searches.
+        if local_documents:
+            doc_blocks = []
+            for doc in local_documents:
+                name = doc.get("name", "unnamed")
+                content = doc.get("content", "").strip()
+                if content:
+                    doc_blocks.append(f"[Document: {name}]\n{content}")
+            if doc_blocks:
+                plan_prompt += (
+                    "\n\nLocal context documents (treat as primary sources; "
+                    "prefer these over re-fetching the same information):\n\n"
+                    + "\n\n".join(doc_blocks)
+                    + "\n\n"
+                )
+                yield ResponseMessage(
+                    type="status",
+                    message=f"Root agent: incorporating {len(doc_blocks)} local document(s)…",
+                )
+
         # Inject the current date to aid root agent with its temporal reasoning and source evaluation
         # (e.g. "if your training cutoff is in 2021 but today's date is 2024, you should prioritize
         #  current sources and be skeptical of outdated info in your training data").
@@ -888,7 +927,7 @@ class Orchestrator:
             max_tokens=self.config.root_max_tokens,
         )
 
-        plan = self._parse_plan(response.content)
+        plan = self._parse_plan(response.content, query=query)
 
         self._pending_plan = plan
         self.context.save_step("query", query)
@@ -955,7 +994,26 @@ class Orchestrator:
         )
 
         # ── Execute each batch ───────────────────────────────────────────────
+        self._batch_memory = ""
         for batch_idx, batch in enumerate(batches, start=1):
+            # ── Batch-level long-term memory recall ─────────────────────────
+            # Recall once per batch (cached across the batch's parallel steps)
+            # so each step's Search and Analyst agents can build on knowledge
+            # from prior research sessions.  Failures are swallowed inside
+            # _recall_memories, so this never breaks execution.
+            batch_recall_query = " ".join(s.description for s in batch).strip()
+            self._batch_memory = await self._recall_memories(
+                batch_recall_query or query, limit=5
+            )
+            if self._batch_memory:
+                yield ResponseMessage(
+                    type="status",
+                    message=(
+                        f"Batch {batch_idx}: recalled prior-session knowledge from "
+                        "long-term memory to inform step research."
+                    ),
+                )
+
             is_parallel = len(batch) > 1
 
             if is_parallel:
@@ -1198,6 +1256,7 @@ class Orchestrator:
                     else ""
                 ),
                 status_sink=_search_status,
+                ltm_context=getattr(self, "_batch_memory", "") or None,
             )
             for _msg in _search_status:
                 yield _msg
@@ -1209,7 +1268,13 @@ class Orchestrator:
                 type="status",
                 message=f"[Analyst] Extracting claims for step {step.id}…",
             )
-            analyst_result = await self._run_analyst(step, query, search_result, tools)
+            analyst_result = await self._run_analyst(
+                step,
+                query,
+                search_result,
+                tools,
+                ltm_context=getattr(self, "_batch_memory", "") or None,
+            )
             self.context.save_step(
                 f"analyst_step_{step.id}", json.dumps(analyst_result)
             )
@@ -1479,8 +1544,48 @@ class Orchestrator:
                         json.dumps(analyst_result),
                     )
 
+                    # Mark the actionable contradictions just re-investigated as
+                    # resolved.  These are the same Contradiction instances
+                    # recorded in self._contradictions, so the report's
+                    # "unresolved contradictions" caveats and observability now
+                    # accurately reflect that targeted re-search addressed them.
+                    _new_chunk_count = max(chunks_after - chunks_before, 0)
+                    for _c in actionable:
+                        _c.resolved = True
+                        _c.resolution = (
+                            f"Targeted re-search gathered {_new_chunk_count} new "
+                            "source chunk(s); claims re-extracted and reconciled."
+                        )
+
             # Persist QA-vetted findings to long-term memory for future sessions
             await self._store_analyst_findings(step, analyst_result)
+
+            # Persist this step's raw evidence incrementally so learnings survive
+            # a mid-session crash and are available to later steps/sessions —
+            # rather than only writing everything after synthesis completes.
+            try:
+                await self._search_store.persist_to_long_term_memory(
+                    query=step.description,
+                    top_k=10,
+                    step_id_filter=step.id,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[Orchestrator] Incremental evidence persist skipped for "
+                    "step %d: %s",
+                    step.id,
+                    exc,
+                )
+
+            # Deduplicate the tools invoked across the initial search and any QA
+            # re-search passes, preserving first-seen order, for both the
+            # observability event and the step_complete payload below.
+            _seen_tools: set = set()
+            tools_used = [
+                t
+                for t in all_tools_used
+                if not (t in _seen_tools or _seen_tools.add(t))  # type: ignore[func-returns-value]
+            ]
 
             # Emit a structured event so analyst notes for every step are
             # captured in per-session log dumps for pipeline diagnostics.
@@ -1492,6 +1597,7 @@ class Orchestrator:
                 claim_count=len(analyst_result.get("claims", [])),
                 tension_count=len(analyst_result.get("tensions", [])),
                 qa_retries=qa_retry_count,
+                tools_used=tools_used,
                 analyst_notes=str(analyst_result.get("analyst_notes") or ""),
                 claims=[
                     {
@@ -1514,32 +1620,15 @@ class Orchestrator:
                 ],
             )
 
-            # ── Supersede contradicted source chunks in the RAG store ────────
-            # When the LoopAgent resolves a contradiction it identifies which
-            # claim (and therefore which source step) is wrong.  We flag
-            # the losing step's chunks as superseded so they don't pollute
-            # future retrievals for other steps or the synthesis phase.
-            resolved_contradictions = [
-                c for c in self._contradictions if c.resolved and c.resolution
-            ]
-            for contradiction in resolved_contradictions:
-                # Heuristic: if source_a looks like a step reference ("step_N"),
-                # supersede that step's chunks; otherwise supersede by step_id.
-                for src_field in (contradiction.source_a, contradiction.source_b):
-                    if src_field and src_field.startswith("step_"):
-                        try:
-                            losing_step_id = int(src_field.split("_")[1])
-                            if losing_step_id != step.id:
-                                self._search_store.mark_superseded_by_step(
-                                    losing_step_id,
-                                    reason=f"Contradiction resolved: {contradiction.context}",
-                                )
-                                self.context.supersede(
-                                    losing_step_id,
-                                    reason=f"Contradiction resolved: {contradiction.context}",
-                                )
-                        except (IndexError, ValueError):
-                            pass
+            # ── Contradiction resolution bookkeeping ─────────────────────────
+            # Contradictions are detected WITHIN a single step's analyst output,
+            # so their source_a/source_b fields are source URLs/labels from this
+            # step — never cross-step references.  Resolution is therefore
+            # reflected via the Contradiction.resolved flag (set in the QA loop
+            # after a successful targeted re-search), which excludes them from
+            # the report's unresolved-contradiction caveats.  We do not supersede
+            # whole-step chunks here because that would discard this step's valid
+            # evidence along with the contradicted claim.
 
             # ── Generate per-step summary (Active Context briefing) ──────────
             # This ≤config.step_summary_max_chars bullet summary is stored in
@@ -1585,12 +1674,6 @@ class Orchestrator:
 
             # ── Final bookkeeping ────────────────────────────────────────────
             self._step_sources[step.id] = self._extract_sources(search_result)
-
-            # Deduplicate tools list while preserving order
-            seen: set = set()
-            tools_used = [
-                t for t in all_tools_used if not (t in seen or seen.add(t))  # type: ignore[func-returns-value]
-            ]
 
             self._raw_findings.append(search_result)
             self._analyst_output = self._merge_analyst_outputs(
@@ -1967,6 +2050,11 @@ class Orchestrator:
             if structured_claims_block:
                 draft_prompt_parts.append(structured_claims_block)
             if not section_evidence and not structured_claims_block:
+                logger.warning(
+                    "[Synthesis] No RAG evidence or structured claims for section "
+                    "'%s' — falling back to raw analyst output.",
+                    sec_title,
+                )
                 # Last-resort fallback: pull relevant subset from analyst output
                 analyst_str = json.dumps(self._analyst_output, indent=2)
                 draft_prompt_parts.append(f"Research Findings:\n{analyst_str[:6000]}")
@@ -2108,8 +2196,19 @@ class Orchestrator:
             )
 
         # ── Assemble final document ──────────────────────────────────────────
+        # Separate genuine multi-perspective source disagreements (legitimate
+        # research findings) from unresolved factual contradictions (gaps or
+        # errors) so the report frames each appropriately instead of lumping
+        # valid disagreements under "unresolved contradictions".
+        source_perspective_disagreements = [
+            c.to_dict()
+            for c in self._contradictions
+            if not c.resolved and c.contradiction_type == "source_disagreement"
+        ]
         unresolved_step_contradictions = [
-            c.to_dict() for c in self._contradictions if not c.resolved
+            c.to_dict()
+            for c in self._contradictions
+            if not c.resolved and c.contradiction_type != "source_disagreement"
         ]
 
         doc_parts: List[str] = [
@@ -2140,6 +2239,21 @@ class Orchestrator:
                     f"{i}. {uc.get('context', '')} "
                     f"(Source A: {uc.get('source_a', '')} — {uc.get('claim_a', '')}; "
                     f"Source B: {uc.get('source_b', '')} — {uc.get('claim_b', '')})"
+                )
+            doc_parts.append("")
+
+        if source_perspective_disagreements:
+            doc_parts.append("SOURCE PERSPECTIVES AND DISAGREEMENTS")
+            doc_parts.append(
+                "The following reflect genuine differences in how credible sources "
+                "assess the same question — not factual errors. They are presented "
+                "so readers can weigh the competing perspectives."
+            )
+            for i, sd in enumerate(source_perspective_disagreements, start=1):
+                doc_parts.append(
+                    f"{i}. {sd.get('context', '')} "
+                    f"(Perspective A: {sd.get('source_a', '')} — {sd.get('claim_a', '')}; "
+                    f"Perspective B: {sd.get('source_b', '')} — {sd.get('claim_b', '')})"
                 )
             doc_parts.append("")
 
@@ -2344,7 +2458,9 @@ class Orchestrator:
                 temperature=self.config.root_temperature,
                 max_tokens=self.config.root_max_tokens,
             )
-            modified_plan = self._parse_plan(response.content)
+            modified_plan = self._parse_plan(
+                response.content, query=self.context.get_step_result("query") or ""
+            )
             self._pending_plan = modified_plan
             self.context.save_step("plan", json.dumps(modified_plan.to_dict()))
 
@@ -2707,6 +2823,7 @@ Return ONLY a JSON object:
         tools: List[Dict[str, Any]],
         extra_context: Optional[str] = None,
         status_sink: Optional[List] = None,
+        ltm_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the SearchAgent for a single plan step.
 
@@ -2729,6 +2846,13 @@ Return ONLY a JSON object:
                 "academic papers, official documentation, and authoritative data over "
                 "general summaries. Retrieve multiple independent sources per claim "
                 "and explore sub-topics thoroughly before concluding."
+            )
+        if ltm_context:
+            prompt_parts.append(
+                "Relevant knowledge from prior research sessions (long-term memory). "
+                "Use it to avoid redundant searching and to build on what is already "
+                "known — treat it as prior context to verify, not as ground truth:\n"
+                + ltm_context
             )
         if extra_context:
             prompt_parts.append(f"Additional Context:\n{extra_context}")
@@ -2895,6 +3019,7 @@ Return ONLY a JSON object:
         search_output: Dict[str, Any],
         tools: List[Dict[str, Any]],
         extra_context: Optional[str] = None,
+        ltm_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the AnalystAgent over the search results for a single step.
@@ -2978,6 +3103,26 @@ Return ONLY a JSON object:
                     )
                 search_context = "Search Results:\n" + raw_str
 
+        # ── Surface the SearchAgent's self-identified coverage gaps ──────────
+        # so the analyst can flag under-covered claims instead of silently
+        # extracting over them.  The search phase records these gaps in the
+        # "coverage_notes" field, which the primary RAG path would otherwise
+        # drop entirely.
+        coverage_note = ""
+        _final_msg = search_output.get("final_message", "")
+        if _final_msg:
+            try:
+                _cov = _final_msg
+                if "```json" in _cov:
+                    _cov = _cov.split("```json")[1].split("```")[0].strip()
+                elif "```" in _cov:
+                    _cov = _cov.split("```")[1].split("```")[0].strip()
+                coverage_note = str(
+                    json.loads(_cov).get("coverage_notes", "") or ""
+                ).strip()
+            except Exception:
+                coverage_note = ""
+
         # ── 2. Cross-step corroboration context ──────────────────────────────
         # Retrieve top-5 chunks from OTHER completed steps so the analyst can
         # triangulate claims against independently-gathered evidence.
@@ -3032,6 +3177,12 @@ Return ONLY a JSON object:
             f"Current Step: {step.description}",
             search_context,
         ]
+        if coverage_note:
+            prompt_parts.append(
+                "Search-phase coverage notes (gaps the search agent flagged — "
+                "treat affected claims as lower-confidence and note the missing "
+                "evidence rather than overstating):\n" + coverage_note
+            )
         if cross_step_context:
             prompt_parts.append(
                 "Corroborating evidence from prior steps "
@@ -3042,6 +3193,13 @@ Return ONLY a JSON object:
                 "Structured findings from prior steps "
                 "(use to corroborate, extend, or identify conflicts with your new claims):\n\n"
                 + prior_claims_block
+            )
+        if ltm_context:
+            prompt_parts.append(
+                "Relevant knowledge from prior research sessions (long-term memory). "
+                "Corroborate your new claims against it or extend it — do not blindly "
+                "trust it; flag conflicts with prior knowledge as tensions:\n"
+                + ltm_context
             )
         if extra_context:
             prompt_parts.append(f"Additional Context:\n{extra_context}")
@@ -3137,7 +3295,7 @@ Return ONLY a JSON object:
     # ── Plan parsing ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _parse_plan(raw: str) -> ResearchPlan:
+    def _parse_plan(raw: str, query: str = "") -> ResearchPlan:
         """Parse the Root agent's JSON output into a ``ResearchPlan``."""
         content = raw
         if "```json" in content:
@@ -3159,15 +3317,22 @@ Return ONLY a JSON object:
             ]
             return ResearchPlan(goal=data.get("goal", "Research goal"), steps=steps)
         except Exception as exc:
-            logger.warning("Could not parse plan JSON (%s) — using fallback.", exc)
-            # Fallback: single generic step
+            logger.warning(
+                "Could not parse plan JSON (%s) — using query-based fallback. "
+                "Raw response head: %.300s",
+                exc,
+                raw,
+            )
+            # Fallback: a single step that still reflects the user's query so a
+            # parse failure does not silently discard the research topic.
+            topic = (query or "the research topic").strip()
             return ResearchPlan(
-                goal="Research goal",
+                goal=f"Research: {topic[:200]}",
                 steps=[
                     ResearchStep(
                         id=1,
                         name="Step 1",
-                        description="Gather information on the research topic.",
+                        description=f"Gather comprehensive information on: {topic[:300]}",
                         status=StepStatus.PENDING,
                     )
                 ],

@@ -7,6 +7,7 @@ interface ChatContainerProps {
   messages: Message[];
   isLoading?: boolean;
   currentStatus?: string;
+  onSendMessage?: (text: string) => void;
   onApprovePlan?: (planId: string) => void;
   onModifyPlan?: (planId: string, feedback: string) => void;
   onDenyPlan?: (planId: string) => void;
@@ -18,6 +19,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
   messages,
   isLoading = false,
   currentStatus = 'Researching',
+  onSendMessage,
   onApprovePlan,
   onModifyPlan,
   onDenyPlan,
@@ -43,6 +45,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
+                aria-hidden="true"
               >
                 <path
                   strokeLinecap="round"
@@ -66,9 +69,10 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
                 'Analyze market opportunities in EV',
                 'Compare cloud providers for Agentic applications',
                 'Summarize recent climate studies',
-              ].map((suggestion, i) => (
+              ].map((suggestion) => (
                 <button
-                  key={i}
+                  key={suggestion}
+                  onClick={() => onSendMessage?.(suggestion)}
                   className="text-left text-xs p-3 rounded-lg border border-gray-200 dark:border-gray-700
                              hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400
                              transition-colors duration-150"
@@ -83,17 +87,16 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
 
       {/* Messages */}
       {messages.map((message) => (
-        <div key={message.id}>
-          <ChatMessage
-            message={message}
-            onApprovePlan={onApprovePlan}
-            onModifyPlan={onModifyPlan}
-            onDenyPlan={onDenyPlan}
-            onRegeneratePlan={onRegeneratePlan}
-            onEndResearch={onEndResearch}
-            isLoading={isLoading}
-          />
-        </div>
+        <ChatMessage
+          key={message.id}
+          message={message}
+          onApprovePlan={onApprovePlan}
+          onModifyPlan={onModifyPlan}
+          onDenyPlan={onDenyPlan}
+          onRegeneratePlan={onRegeneratePlan}
+          onEndResearch={onEndResearch}
+          isLoading={isLoading}
+        />
       ))}
 
       {/* Progress Spinner with dynamic status */}

@@ -692,6 +692,55 @@ class TestOrchestratorRunStep:
         # Audit must have been called at least twice (initial + retry)
         assert orch.agents.loop.audit.await_count >= 2
 
+    async def test_actionable_contradiction_marked_resolved_after_research(
+        self, make_orchestrator
+    ):
+        """Regression: an actionable contradiction whose targeted re-search yields
+        new evidence must be flagged ``resolved=True`` with a resolution note.
+
+        Previously ``Contradiction.resolved`` was never set, so contradicted
+        sources were never retired and every contradiction surfaced as
+        "unresolved" in the final report.
+        """
+        from orchestrator import AuditResult, Contradiction
+        from search_result_store import SearchResultStore
+
+        contradiction = Contradiction(
+            source_a="http://a.com",
+            claim_a="X is true",
+            source_b="http://b.com",
+            claim_b="X is false",
+            contradiction_type="factual_error",
+            targeted_query="Is X true or false? primary source",
+        )
+        flagged = AuditResult(contradictions=[contradiction], verdict="flagged")
+        clean = AuditResult(contradictions=[], verdict="clean")
+
+        orch = make_orchestrator(depth="moderate")
+        orch.agents.loop.audit = AsyncMock(side_effect=[flagged, clean])
+        orch.context.save_step("query", "test")
+
+        # chunk_count must increase across the supplemental search so the
+        # data-poverty early-exit is not taken and the resolution path runs.
+        orch._search_store = MagicMock(spec=SearchResultStore)
+        orch._search_store.chunk_count = MagicMock(side_effect=[0, 1])
+        orch._search_store.retrieve = AsyncMock(return_value="")
+        orch._search_store.add = AsyncMock()
+        orch._search_store.mark_superseded_by_step = MagicMock(return_value=0)
+        orch._search_store.filter_long_term_memories = AsyncMock(return_value=[])
+        orch._search_store.persist_to_long_term_memory = AsyncMock(return_value=0)
+
+        from pipeline import PipelineRunner
+
+        runner = PipelineRunner()
+        step = self._step()
+
+        await _collect(orch._run_step(step, "test", tools=[], pipeline_runner=runner))
+
+        assert contradiction.resolved is True
+        assert contradiction.resolution  # non-empty resolution note recorded
+        assert any(c.resolved for c in orch._contradictions)
+
 
 # ===========================================================================
 # Group 6 — Distillation helpers
@@ -1242,3 +1291,38 @@ class TestKnowledgeGraph:
         called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
         # Should MERGE a :Document node (not :Source)
         assert any("Document" in q or "MERGE" in q for q in called_cyphers)
+
+    async def test_store_relationship_auto_upserts_missing_endpoints(self):
+        """store_relationship must auto-create missing endpoint entities.
+
+        Regression: ``MATCH (s) MATCH (t) CREATE (s)-[...]->(t)`` silently
+        no-ops (binding nothing) when either endpoint entity does not yet
+        exist, yet the method still returned ``success: True`` — losing the
+        edge. The fix verifies both endpoints first and upserts any missing
+        one before creating the relationship.
+        """
+        # Default session.single() -> None, so _entity_exists() returns False
+        # for both endpoints, forcing the auto-upsert path.
+        ltm, session_mock = self._build_ltm_with_mocked_driver()
+        ltm.graph.upsert_entity = AsyncMock(
+            return_value={"success": True, "entity_id": "ent-x"}
+        )
+
+        with patch("embeddings.EMBEDDINGS_ENABLED", False):
+            result = await ltm.graph.store_relationship(
+                "Solar power",
+                "Carbon emissions",
+                "reduces",
+                session_id="sess1",
+            )
+
+        upserted_names = {
+            c.kwargs.get("name") for c in ltm.graph.upsert_entity.await_args_list
+        }
+        assert "Solar power" in upserted_names
+        assert "Carbon emissions" in upserted_names
+        # A relationship CREATE must still run after the endpoints are ensured.
+        called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
+        assert any("CREATE" in q for q in called_cyphers)
+        assert result.get("success") is True
+

@@ -53,7 +53,7 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch('/files/upload', {
+    const response = await fetch(`${API_BASE_URL}/files/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -62,13 +62,13 @@ export const apiClient = {
   },
 
   async listFiles() {
-    const response = await fetch('/files');
+    const response = await fetch(`${API_BASE_URL}/files`);
     if (!response.ok) throw new Error('Failed to list files');
     return response.json();
   },
 
   async deleteFile(fileName: string) {
-    const response = await fetch(`/files/${encodeURIComponent(fileName)}`, {
+    const response = await fetch(`${API_BASE_URL}/files/${encodeURIComponent(fileName)}`, {
       method: 'DELETE',
     });
     if (!response.ok) throw new Error('Failed to delete file');
@@ -100,7 +100,8 @@ export const apiClient = {
     content: string,
     onChunk: (chunk: string) => void,
     onDone: () => void,
-    onError: (err: string) => void
+    onError: (err: string) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     let response: Response;
     try {
@@ -108,9 +109,11 @@ export const apiClient = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: 'user', content }),
+        signal,
       });
-    } catch (e: any) {
-      onError(e.message || 'Network error');
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      onError(e instanceof Error ? e.message : 'Network error');
       return;
     }
 
@@ -133,9 +136,11 @@ export const apiClient = {
         onChunk(decoder.decode(value, { stream: true }));
       }
       onDone();
-    } catch (e: any) {
-      onError(e.message || 'Stream read error');
+    } catch (e: unknown) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      onError(e instanceof Error ? e.message : 'Stream read error');
     } finally {
+      reader.cancel();
       reader.releaseLock();
     }
   },

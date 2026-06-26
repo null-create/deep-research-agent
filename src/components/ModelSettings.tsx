@@ -111,13 +111,12 @@ function buildPayload(form: FormState, original: FormState): Record<string, unkn
   if (form.root.model !== origHeavy) payload.heavy_model = form.root.model;
   if (form.search.model !== origLight) payload.light_model = form.search.model;
 
-  // Per-agent overrides (only set when different from the heavy/light defaults)
-  if (form.root.model !== form.search.model) {
-    payload.root_model_override = form.root.model;
-    payload.qa_model_override = form.qa.model;
-    payload.search_model_override = form.search.model;
-    payload.analyst_model_override = form.analyst.model;
-  }
+  // Per-agent overrides: always emit them so each agent's model is saved
+  // independently of whether root and search happen to be equal.
+  payload.root_model_override = form.root.model;
+  payload.qa_model_override = form.qa.model;
+  payload.search_model_override = form.search.model;
+  payload.analyst_model_override = form.analyst.model;
 
   payload.root_temperature = form.root.temperature;
   payload.search_temperature = form.search.temperature;

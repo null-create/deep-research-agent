@@ -448,6 +448,94 @@ def test_run_analyst_cross_step_retrieval():
     print("✅ _run_analyst uses exclude_step_id for cross-step corroboration")
 
 
+def test_contradiction_resolution_marks_resolved():
+    """_run_step must mark actionable contradictions resolved after re-search.
+
+    Regression guard: Contradiction.resolved was never set, so contradicted
+    sources were never retired and every contradiction surfaced as
+    "unresolved" in the report.
+    """
+    from orchestrator import Orchestrator
+    import inspect
+
+    src = inspect.getsource(Orchestrator._run_step)
+    assert (
+        ".resolved = True" in src
+    ), "_run_step must set Contradiction.resolved = True after targeted re-search"
+    assert (
+        ".resolution" in src
+    ), "_run_step must record a resolution note on resolved contradictions"
+    print("✅ _run_step marks actionable contradictions resolved after re-search")
+
+
+def test_report_splits_source_disagreements():
+    """Report assembly must separate genuine source disagreements (valid
+    multi-perspective findings) from unresolved factual contradictions."""
+    with open("orchestrator.py") as fh:
+        source = fh.read()
+
+    assert (
+        "SOURCE PERSPECTIVES AND DISAGREEMENTS" in source
+    ), "report assembly must emit a dedicated source-perspectives section"
+    assert (
+        "UNRESOLVED SOURCE CONTRADICTIONS" in source
+    ), "report assembly must keep an unresolved-contradictions section"
+    assert (
+        "source_perspective_disagreements" in source
+    ), "report assembly must build a source_perspective_disagreements list"
+    assert (
+        'contradiction_type == "source_disagreement"' in source
+    ), "report assembly must branch on contradiction_type == 'source_disagreement'"
+    print("✅ report assembly splits source disagreements from factual contradictions")
+
+
+def test_batch_memory_recall_wiring():
+    """execute() must recall long-term memory per batch and pass it to the
+    search and analyst agents via an ltm_context parameter."""
+    from orchestrator import Orchestrator
+    import inspect
+
+    exec_src = inspect.getsource(Orchestrator.execute)
+    assert (
+        "_batch_memory" in exec_src
+    ), "execute must maintain a per-batch long-term memory cache"
+    assert (
+        "_recall_memories(" in exec_src
+    ), "execute must recall long-term memory at batch start"
+
+    search_params = inspect.signature(Orchestrator._run_search).parameters
+    analyst_params = inspect.signature(Orchestrator._run_analyst).parameters
+    assert (
+        "ltm_context" in search_params
+    ), "_run_search must accept an ltm_context parameter"
+    assert (
+        "ltm_context" in analyst_params
+    ), "_run_analyst must accept an ltm_context parameter"
+    print("✅ batch-level LTM recall wired into execute, _run_search, _run_analyst")
+
+
+def test_persist_step_id_filter():
+    """persist_to_long_term_memory must support step_id_filter and _run_step
+    must use it for incremental per-step persistence."""
+    from search_result_store import SearchResultStore
+    import inspect
+
+    persist_params = inspect.signature(
+        SearchResultStore.persist_to_long_term_memory
+    ).parameters
+    assert (
+        "step_id_filter" in persist_params
+    ), "persist_to_long_term_memory must accept a step_id_filter parameter"
+
+    from orchestrator import Orchestrator
+
+    run_step_src = inspect.getsource(Orchestrator._run_step)
+    assert (
+        "step_id_filter=step.id" in run_step_src
+    ), "_run_step must persist incrementally with step_id_filter=step.id"
+    print("✅ persist_to_long_term_memory step_id_filter honored by _run_step")
+
+
 def test_qa_loop_data_poverty_exit():
     """Verify QA retry path checks chunk_count for data poverty early exit."""
     from orchestrator import Orchestrator
@@ -2144,6 +2232,11 @@ if __name__ == "__main__":
         test_run_analyst_strips_coverage_notes,
         test_run_analyst_cross_step_retrieval,
         test_qa_loop_data_poverty_exit,
+        # Audit-remediation regression guards
+        test_contradiction_resolution_marks_resolved,
+        test_report_splits_source_disagreements,
+        test_batch_memory_recall_wiring,
+        test_persist_step_id_filter,
         # Self-optimize pipeline fixes
         test_self_optimize_uses_long_term_memory,
         test_self_optimize_api_server_wiring,

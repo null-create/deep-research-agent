@@ -1324,7 +1324,10 @@ class ResearchScreen(Screen):
             self._log(f"[bold red]Planning failed: {exc}[/bold red]")
         finally:
             self._busy = False
-            self.query_one("#btn-run-research").disabled = False
+            # Keep the run button disabled while a plan is awaiting user approval.
+            # The approve / deny / modify handlers re-enable it when appropriate.
+            if self._plan is None:
+                self.query_one("#btn-run-research").disabled = False
 
     @work(exclusive=True, thread=False)
     async def _run_modify_plan(self, feedback: str) -> None:
@@ -2051,7 +2054,7 @@ class MCPScreen(Screen):
                 yield Button("✘  Remove Selected", id="btn-mcp-remove")
 
                 with ScrollableContainer(id="mcp-server-list"):
-                    yield RichLog(id="mcp-log", highlight=True, markup=True)
+                    yield OptionList(id="mcp-log")
 
                 with ScrollableContainer(id="mcp-tools-panel"):
                     yield Label("🔧  Tools", id="mcp-tools-title")
@@ -2112,11 +2115,11 @@ class MCPScreen(Screen):
             )
             sidebar.mount(lbl)
 
-        # Update main log
-        log = self.query_one("#mcp-log", RichLog)
-        log.clear()
+        # Update main OptionList
+        server_list = self.query_one("#mcp-log", OptionList)
+        server_list.clear_options()
         if not servers:
-            log.write(Text("No MCP servers registered.", style="dim"))
+            server_list.add_option(Option("No MCP servers registered.", id="__empty__"))
             return
         for info in servers:
             name = info["name"]
@@ -2126,12 +2129,22 @@ class MCPScreen(Screen):
             builtin = "builtin" if info.get("builtin") else "user"
             url = info.get("url", info.get("command", ""))
             style = "green" if status == "connected" else "red"
-            log.write(
-                Text(
-                    f"  {name}  [{transport}]  {url}  — {tools_count} tool(s)  ({status}, {builtin})",
-                    style=style,
+            server_list.add_option(
+                Option(
+                    Text(
+                        f"  {name}  [{transport}]  {url}  — {tools_count} tool(s)  ({status}, {builtin})",
+                        style=style,
+                    ),
+                    id=name,
                 )
             )
+
+    @on(OptionList.OptionSelected, "#mcp-log")
+    def _server_selected(self, event: OptionList.OptionSelected) -> None:
+        server_name = event.option_id
+        if server_name and server_name != "__empty__":
+            self._selected_server = server_name
+            self._show_tools_for(server_name)
 
     def _show_tools_for(self, server_name: str) -> None:
         tools_log = self.query_one("#mcp-tools-log", RichLog)
@@ -2206,14 +2219,18 @@ class MCPScreen(Screen):
     @work(exclusive=True, thread=False)
     async def _remove_server(self) -> None:
         feedback = self.query_one("#home-feedback", Label)
-        servers = self.app.mcp_registry.get_all_server_info()
-        # Remove the last non-builtin server (user should select in the future)
-        user_servers = [s for s in servers if not s.get("builtin")]
-        if not user_servers:
-            feedback.update("No user-added servers to remove.")
+        if not self._selected_server:
+            feedback.update("Select a server from the list first.")
             return
-        target = user_servers[-1]["name"]
+        # Prevent removing built-in servers
+        servers = self.app.mcp_registry.get_all_server_info()
+        info = next((s for s in servers if s["name"] == self._selected_server), None)
+        if info and info.get("builtin"):
+            feedback.update(f"'{self._selected_server}' is a built-in server and cannot be removed.")
+            return
+        target = self._selected_server
         await self.app.mcp_registry.unregister(target)
+        self._selected_server = None
         feedback.update(f"✔ Removed '{target}'")
         self._refresh_servers()
 
@@ -2261,7 +2278,7 @@ class SessionsScreen(Screen):
                     yield Button("▶  Resume Selected", id="btn-session-resume")
 
                 with ScrollableContainer(id="sessions-list"):
-                    yield RichLog(id="sessions-log", highlight=True, markup=True)
+                    yield OptionList(id="sessions-log")
 
                 with ScrollableContainer(id="sessions-detail"):
                     yield Label("Session Detail", id="sessions-detail-title")
@@ -2277,8 +2294,8 @@ class SessionsScreen(Screen):
     def _load_sessions(self) -> None:
         """Scan disk checkpoints to list past sessions."""
         self._session_ids = []
-        log = self.query_one("#sessions-log", RichLog)
-        log.clear()
+        session_list = self.query_one("#sessions-log", OptionList)
+        session_list.clear_options()
 
         try:
             self.query_one("#sidebar-sess-loading").remove()
@@ -2296,7 +2313,7 @@ class SessionsScreen(Screen):
                 child.remove()
 
         if not _SESSIONS_DIR.exists():
-            log.write(Text("No sessions found.", style="dim"))
+            session_list.add_option(Option("No sessions found.", id="__empty__"))
             return
 
         # Collect checkpoint files
@@ -2307,7 +2324,7 @@ class SessionsScreen(Screen):
         )
 
         if not files:
-            log.write(Text("No sessions found.", style="dim"))
+            session_list.add_option(Option("No sessions found.", id="__empty__"))
             return
 
         for i, f in enumerate(files[:20]):  # Show last 20
@@ -2323,10 +2340,10 @@ class SessionsScreen(Screen):
                     if ev.get("type") == "plan":
                         plan_data = ev.get("plan", ev.get("data", {}).get("plan", {}))
                         if isinstance(plan_data, dict):
-                            goal = plan_data.get("goal", "")[:50]
+                            goal = plan_data.get("goal", "")[:60]
                             break
                     elif ev.get("type") == "status" and not goal:
-                        goal = ev.get("message", "")[:50]
+                        goal = ev.get("message", "")[:60]
 
             except Exception:
                 state = "unknown"
@@ -2340,10 +2357,11 @@ class SessionsScreen(Screen):
             }.get(state, "")
             icon = {"complete": "✔", "error": "✘", "executing": "⏳"}.get(state, "○")
 
-            display = f"  {icon} [{i+1}] {sid[:12]}…  {state}  {created}"
+            display = f"  {icon} [{i + 1}] {sid[:14]}…  {state}  {created}"
             if goal:
-                display += f"\n       {goal}"
-            log.write(Text(display, style="green" if state == "complete" else "dim"))
+                display += f"  |  {goal}"
+            style = "green" if state == "complete" else "dim"
+            session_list.add_option(Option(Text(display, style=style), id=str(i)))
 
             sidebar.mount(
                 Label(
@@ -2352,6 +2370,42 @@ class SessionsScreen(Screen):
                     classes=f"sidebar-item session-entry {state_css}",
                 )
             )
+
+    @on(OptionList.OptionSelected, "#sessions-log")
+    def _session_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = event.option_id
+        if opt_id and opt_id != "__empty__":
+            self._selected_index = int(opt_id)
+            self._show_session_detail(self._selected_index)
+            self.query_one("#btn-session-resume").display = True
+
+    def _show_session_detail(self, index: int) -> None:
+        if index < 0 or index >= len(self._session_ids):
+            return
+        sid = self._session_ids[index]
+        checkpoint_file = _SESSIONS_DIR / f"{sid}.json"
+        detail_log = self.query_one("#sessions-detail-log", RichLog)
+        detail_log.clear()
+        self.query_one("#sessions-detail").display = True
+        try:
+            data = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+            goal = ""
+            for ev in data.get("replay_log", []):
+                if ev.get("type") == "plan":
+                    plan_data = ev.get("plan", ev.get("data", {}).get("plan", {}))
+                    if isinstance(plan_data, dict):
+                        goal = plan_data.get("goal", "")
+                        break
+            state = data.get("state", "unknown")
+            created = data.get("created_at", "?")[:19]
+            replay_count = len(data.get("replay_log", []))
+            detail_log.write(Text(f"Session ID: {sid}", style="bold"))
+            detail_log.write(Text(f"State:      {state}  |  Created: {created}", style="dim"))
+            detail_log.write(Text(f"Events:     {replay_count}", style="dim"))
+            if goal:
+                detail_log.write(Text(f"Goal:       {goal}", style="green"))
+        except Exception as exc:
+            detail_log.write(Text(f"Error reading session: {exc}", style="red"))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""

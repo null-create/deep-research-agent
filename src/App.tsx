@@ -19,6 +19,17 @@ const WS_URL = import.meta.env.VITE_WS_URL || `${location.protocol.replace('http
 const LS_SESSION_ID = 'deep_research_session_id';
 const LS_CONV_ID = 'deep_research_conv_id';
 
+/**
+ * crypto.randomUUID() requires a secure context (https or localhost).
+ * Fall back to a simple pseudo-random id on plain http (e.g. LAN dev).
+ */
+function generateId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const AppContent: React.FC = () => {
   const {
     messages,
@@ -67,7 +78,9 @@ const AppContent: React.FC = () => {
   const activeEventIndexRef = useRef<number>(0);
 
   const [currentStatus, setCurrentStatus] = useState<string>('Researching');
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' && window.innerWidth >= 768
+  );
   const [researchDepth, setResearchDepth] = useState<ResearchDepth>('shallow');
   const { theme, toggleTheme } = useTheme();
   const [currentPlanID, setCurrentPlanID] = useState<string | null>(null);
@@ -134,8 +147,7 @@ const AppContent: React.FC = () => {
   const {
     isConnected,
     isReconnecting,
-    messageQueue,
-    clearMessageQueue,
+    drainMessageQueue,
     sendMessage,
     reconnect,
   } = useWebSocket(WS_URL, { onReconnected: handleReconnected, onInitialConnect: handleInitialConnect });
@@ -175,9 +187,8 @@ const AppContent: React.FC = () => {
   // =====================
 
   useEffect(() => {
-    if (!messageQueue.length) return;
-    const msgs = [...messageQueue];
-    clearMessageQueue();
+    const msgs = drainMessageQueue();
+    if (!msgs.length) return;
 
     for (const rawMessage of msgs) {
       const { type, data, message, plan } = rawMessage;
@@ -262,7 +273,7 @@ const AppContent: React.FC = () => {
           // Notify the user that we've reconnected successfully.
           if (researchConvIdRef.current) {
             addMessageToConv(researchConvIdRef.current, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'system',
               type: 'system',
               content: rawMessage.complete
@@ -333,7 +344,7 @@ const AppContent: React.FC = () => {
 
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'plan_approval',
               content: 'I have created a research plan. Please review it below.',
@@ -360,7 +371,7 @@ const AppContent: React.FC = () => {
 
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'system',
               content: 'The research plan was denied. Please submit a new query to start again.',
@@ -380,7 +391,7 @@ const AppContent: React.FC = () => {
 
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'step_start',
               content: `Starting step: ${data?.step?.description || 'Unknown Step'}`,
@@ -404,7 +415,7 @@ const AppContent: React.FC = () => {
           }
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'step_complete',
               content: data?.skipped_synthesis
@@ -427,7 +438,7 @@ const AppContent: React.FC = () => {
           }
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'step_failed',
               content: `${message || 'Step failed'}. Error: ${stepError || 'Unknown error.'}`,
@@ -459,7 +470,7 @@ const AppContent: React.FC = () => {
           // Session is still alive until 'report' arrives; keep activeSessionIdRef.
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'research_complete',
               content: message || (data?.content ?? 'Research complete.'),
@@ -483,7 +494,7 @@ const AppContent: React.FC = () => {
           const formattedSummary = synthParts.join('\n\n') || data?.summary || message || 'No synthesis data available.';
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'synthesis',
               content: message || 'Synthesis complete.',
@@ -519,7 +530,7 @@ const AppContent: React.FC = () => {
           }
           if (!isReplayedEvent && researchConvIdRef.current) {
             addMessageToConv(researchConvIdRef.current, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'error',
               content: message || (data?.message ?? 'An unexpected error occurred.'),
@@ -561,7 +572,7 @@ const AppContent: React.FC = () => {
           setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
           if (!isReplayedEvent) {
             addMessageToConv(researchConvIdRef.current!, {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: 'assistant',
               type: 'report',
               content: message || 'Research report complete.',
@@ -611,6 +622,7 @@ const AppContent: React.FC = () => {
           break;
 
         case 'optimize_progress': {
+          if (isReplayedEvent) break;
           const phase = data?.phase;
           const phaseStatus = data?.status;
           console.log('[optimize] Phase:', phase, phaseStatus);
@@ -622,7 +634,7 @@ const AppContent: React.FC = () => {
           }
           setCurrentStatus(message || 'Optimizing…');
           addMessageToConv(optimizeConvIdRef.current!, {
-            id: crypto.randomUUID(),
+            id: generateId(),
             role: 'assistant',
             type: 'system',
             content: message || 'Optimization in progress…',
@@ -632,12 +644,13 @@ const AppContent: React.FC = () => {
         }
 
         case 'optimize_complete': {
+          if (isReplayedEvent) break;
           console.log('[optimize] Complete:', data);
           setIsOptimizing(false);
           setCurrentStatus('Optimization Complete');
           const methodsCount = data?.new_methods_count ?? 0;
           addMessageToConv(optimizeConvIdRef.current!, {
-            id: crypto.randomUUID(),
+            id: generateId(),
             role: 'assistant',
             type: 'system',
             content: `✅ Self-optimization complete. ${methodsCount} new research method(s) integrated into RESEARCH-METHODS.md.`,
@@ -679,8 +692,7 @@ const AppContent: React.FC = () => {
       setEventIndex(researchConvIdRef.current, activeEventIndexRef.current);
     }
   }, [
-    messageQueue,
-    clearMessageQueue,
+    drainMessageQueue,
     addMessageToConv,
     setIsResearching,
     setPlanStatus,
@@ -702,6 +714,7 @@ const AppContent: React.FC = () => {
     updateOptimizePhase,
     getEventIndex,
     setEventIndex,
+    drainMessageQueue,
     // researchConvIdRef / optimizeConvIdRef / replayTotalRef /
     // pendingTotalEventsRef / activeEventIndexRef are refs;
     // no need to list them
@@ -723,7 +736,7 @@ const AppContent: React.FC = () => {
     initOptimizeGraph(convId);
     setActiveView('graph');
     addMessageToConv(convId, {
-      id: crypto.randomUUID(),
+      id: generateId(),
       role: 'user',
       type: 'user',
       content: '⚙ Run self-optimization workflow',
@@ -755,7 +768,7 @@ const AppContent: React.FC = () => {
       localStorage.setItem(LS_CONV_ID, convId);
 
       addMessageToConv(convId, {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'user',
         type: 'user',
         content,
@@ -778,14 +791,14 @@ const AppContent: React.FC = () => {
       }
 
       addMessageToConv(targetConvId, {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'user',
         type: 'user',
         content,
         timestamp: new Date(),
       });
 
-      const responseMsgId = crypto.randomUUID();
+      const responseMsgId = generateId();
       addMessageToConv(targetConvId, {
         id: responseMsgId,
         role: 'assistant',
@@ -840,7 +853,7 @@ const AppContent: React.FC = () => {
       setCurrentStatus('Researching');
 
       addMessage({
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'system',
         type: 'system',
         content: '✅ Research plan approved. Starting research...',
@@ -875,7 +888,7 @@ const AppContent: React.FC = () => {
       setCurrentStatus('Regenerating Plan');
 
       addMessage({
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'system',
         type: 'system',
         content: `✏️ Plan modification requested: "${feedback}". Generating updated plan...`,
@@ -940,7 +953,7 @@ const AppContent: React.FC = () => {
       setCurrentStatus('Regenerating Plan');
 
       addMessage({
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'system',
         type: 'system',
         content: '🔄 Plan denied. Generating a new research plan...',
@@ -970,7 +983,7 @@ const AppContent: React.FC = () => {
       setCurrentStatus('');
 
       addMessage({
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: 'system',
         type: 'system',
         content: '🛑 Research inquiry ended. Submit a new query to start again.',
@@ -982,7 +995,7 @@ const AppContent: React.FC = () => {
 
   return (
     <>
-      <div className="flex h-screen bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+      <div className="flex h-screen [height:100dvh] overflow-hidden bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
         {/* Sidebar */}
         {sidebarOpen && (
           <Sidebar
@@ -995,6 +1008,7 @@ const AppContent: React.FC = () => {
             researchDepth={researchDepth}
             onResearchDepthChange={setResearchDepth}
             isResearching={isResearching}
+            onMobileClose={() => setSidebarOpen(false)}
           />
         )}
 
@@ -1046,8 +1060,7 @@ const AppContent: React.FC = () => {
               <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5 gap-0.5">
                 <button
                   onClick={() => setActiveView('chat')}
-                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
-                    activeView === 'chat'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${activeView === 'chat'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
@@ -1058,8 +1071,7 @@ const AppContent: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setActiveView('graph')}
-                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
-                    activeView === 'graph'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${activeView === 'graph'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
@@ -1126,6 +1138,7 @@ const AppContent: React.FC = () => {
               messages={messages}
               isLoading={isResearching}
               currentStatus={currentStatus}
+              onSendMessage={handleSendMessage}
               onApprovePlan={handleApprovePlan}
               onModifyPlan={handleModifyPlan}
               onDenyPlan={handleDenyPlan}

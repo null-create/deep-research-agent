@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Conversation, Message } from '../types/conversation';
 
 const STORAGE_KEY = 'deep_research_conversations';
@@ -7,6 +7,9 @@ const ACTIVE_CONVERSATION_KEY = 'deep_research_active_conversation';
 export function useConversations() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  // Track whether the initial localStorage load has completed so the persist
+  // effect doesn't overwrite stored data before the load effect runs.
+  const loadedRef = useRef(false);
 
   const updateMessageInConversation = useCallback(
     (conversationId: string, messageId: string, dataUpdate: Record<string, any>) => {
@@ -53,11 +56,15 @@ export function useConversations() {
       }
     } catch (e) {
       console.error('Failed to load conversations from storage:', e);
+    } finally {
+      loadedRef.current = true;
     }
   }, []);
 
-  // Persist to localStorage whenever conversations change
+  // Persist to localStorage whenever conversations change — but only after
+  // the initial load has completed to avoid clobbering stored data.
   useEffect(() => {
+    if (!loadedRef.current) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
     } catch (e) {
@@ -76,7 +83,7 @@ export function useConversations() {
 
   const createConversation = useCallback((title?: string): Conversation => {
     const newConversation: Conversation = {
-      id: Math.random().toString(36).substr(2, 9) + Date.now().toString(36),
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
       title: title || `Research ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -88,12 +95,7 @@ export function useConversations() {
   }, []);
 
   const deleteConversation = useCallback((id: string) => {
-    setConversations((prev) => {
-      const updated = prev.filter((c) => c.id !== id);
-      // Persist immediately to localStorage
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      return updated;
-    });
+    setConversations((prev) => prev.filter((c) => c.id !== id));
 
     // If the deleted conversation is active, clear it
     setActiveConversationId((prevActive) => {

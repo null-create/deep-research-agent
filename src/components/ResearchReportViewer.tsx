@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { pdf } from '@react-pdf/renderer';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Download, X, ChevronLeft, ChevronRight, FileText, ZoomIn, ZoomOut } from 'lucide-react';
@@ -32,19 +32,37 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [isGenerating, setIsGenerating] = useState(false);
   const [scale, setScale] = useState(1.0);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const pdfContainerRef = useRef<HTMLDivElement>(null);
+
+  // Revoke the previous blob URL whenever we create a new one or unmount.
+  const prevPdfUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    return () => {
+      if (prevPdfUrlRef.current) URL.revokeObjectURL(prevPdfUrlRef.current);
+    };
+  }, []);
+
+  // Non-passive wheel listener for pinch-to-zoom on the PDF container.
+  useEffect(() => {
+    const el = pdfContainerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      setScale((s) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round((s + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP)) * 100) / 100)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [isOpen]);
 
   const adjustZoom = useCallback((delta: number) => {
     setScale((s) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round((s + delta) * 100) / 100)));
   }, []);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    adjustZoom(e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP);
-  }, [adjustZoom]);
-
   const generatePdf = async () => {
     setIsGenerating(true);
+    setPdfError(null);
     try {
       const blob = await pdf(
         <ResearchReportDocument
@@ -53,11 +71,15 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
           generatedAt={generatedAt}
         />
       ).toBlob();
+      // Revoke the previous URL before creating a new one.
+      if (prevPdfUrlRef.current) URL.revokeObjectURL(prevPdfUrlRef.current);
       const url = URL.createObjectURL(blob);
+      prevPdfUrlRef.current = url;
       setPdfUrl(url);
       setIsOpen(true);
     } catch (err) {
       console.error('Failed to generate PDF:', err);
+      setPdfError('Failed to generate report PDF. Please try again.');
     } finally {
       setIsGenerating(false);
     }
@@ -67,6 +89,12 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
     setIsOpen(false);
     setCurrentPage(1);
     setScale(1.0);
+    // Revoke blob URL on close to free memory.
+    if (prevPdfUrlRef.current) {
+      URL.revokeObjectURL(prevPdfUrlRef.current);
+      prevPdfUrlRef.current = null;
+    }
+    setPdfUrl(null);
   };
 
   const handleDownload = () => {
@@ -89,10 +117,20 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
         {isGenerating ? 'Generating...' : 'View Report'}
       </button>
 
+      {/* Error feedback */}
+      {pdfError && (
+        <p className="mt-2 text-xs text-red-500 text-center">{pdfError}</p>
+      )}
+
       {/* Modal */}
       {isOpen && pdfUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="relative flex flex-col w-full max-w-4xl max-h-[92vh] mx-4 bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Research Report PDF Viewer"
+          onKeyDown={(e) => { if (e.key === 'Escape') handleClose(); }}
+        >          <div className="relative flex flex-col w-full max-w-4xl max-h-[92vh] mx-4 bg-white dark:bg-gray-900 rounded-2xl shadow-2xl overflow-hidden">
 
             {/* Toolbar */}
             <div className="flex items-center justify-between px-5 py-3 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
@@ -133,6 +171,7 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
                     disabled={scale <= ZOOM_MIN}
                     className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-40 transition-colors text-gray-600 dark:text-gray-300"
                     title="Zoom out"
+                    aria-label="Zoom out"
                   >
                     <ZoomOut className="w-4 h-4" />
                   </button>
@@ -148,6 +187,7 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
                     disabled={scale >= ZOOM_MAX}
                     className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-40 transition-colors text-gray-600 dark:text-gray-300"
                     title="Zoom in"
+                    aria-label="Zoom in"
                   >
                     <ZoomIn className="w-4 h-4" />
                   </button>
@@ -166,16 +206,17 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
                 <button
                   onClick={handleClose}
                   className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  aria-label="Close PDF viewer"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            {/* PDF Viewer */}
+            {/* PDF Viewer — ref attached here for non-passive wheel listener */}
             <div
-              className="flex-1 overflow-y-auto flex justify-center bg-gray-100 dark:bg-gray-950 px-4 py-6"
-              onWheel={handleWheel}
+              ref={pdfContainerRef}
+              className="flex-1 overflow-auto flex justify-center bg-gray-100 dark:bg-gray-950 px-4 py-6"
             >
               <Document
                 file={pdfUrl}
@@ -184,7 +225,7 @@ export const ResearchReportViewer: React.FC<ResearchReportViewerProps> = ({
               >
                 <Page
                   pageNumber={currentPage}
-                  width={Math.round(BASE_WIDTH * scale)}
+                  width={Math.min(Math.round(BASE_WIDTH * scale), window.innerWidth - 48)}
                   className="shadow-lg rounded-lg overflow-hidden"
                 />
               </Document>

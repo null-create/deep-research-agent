@@ -18,7 +18,7 @@ The RAG system has two layers:
 Built entirely **in-process** — no external vector database required. Every research session gets its own isolated `SearchResultStore` instance created at the start of `Orchestrator._reset_state()`.
 
 ```
-MCP tool result (web_scrape / web_search)
+MCP tool result (fetch / web_search)
           │
           ▼
   Orchestrator._distill_tool_result()          ← strips navigation chrome,
@@ -108,13 +108,13 @@ These are `Config` fields in `config.py` (Pydantic, loaded from environment vari
 
 | `Config` field | Default | Env var | Purpose |
 |---|---|---|---|
-| `analyst_top_k` | `8` | `ANALYST_TOP_K` | Chunks retrieved per AnalystAgent RAG query |
+| `analyst_top_k` | `10` | `ANALYST_TOP_K` | Chunks retrieved per AnalystAgent RAG query |
 | `max_tool_result_chars_in_message` | `5000` | `MAX_TOOL_RESULT_CHARS_IN_MESSAGE` | Characters of a tool result kept in SearchAgent's sliding message window (full content in RAG store) |
 | `max_search_history_messages` | `8` | `MAX_SEARCH_HISTORY_MESSAGES` | Sliding window size for SearchAgent's `execution_messages` |
 | `max_analyst_fallback_chars` | `8000` | `MAX_ANALYST_FALLBACK_CHARS` | Chars of raw search output used when the RAG store has no chunks yet (first iteration) |
-| `distill_max_chars` | `2000` | `DISTILL_MAX_CHARS` | Max chars the distillation filter preserves from a raw tool result before chunking |
-| `step_summary_max_chars` | `800` | `STEP_SUMMARY_MAX_CHARS` | Max chars for per-step summary bullets fed to the multi-pass synthesis Outline Phase |
-| `section_draft_top_k` | `6` | `SECTION_DRAFT_TOP_K` | Chunks retrieved per report section during Section-Drafting |
+| `distill_max_chars` | `4000` | `DISTILL_MAX_CHARS` | Max chars the distillation filter preserves from a raw tool result before chunking |
+| `step_summary_max_chars` | `1500` | `STEP_SUMMARY_MAX_CHARS` | Max chars for per-step summary bullets fed to the multi-pass synthesis Outline Phase |
+| `section_draft_top_k` | `10` | `SECTION_DRAFT_TOP_K` | Chunks retrieved per report section during Section-Drafting |
 
 ---
 
@@ -298,4 +298,4 @@ Each `Orchestrator` instance (one per WebSocket `query` message) creates its own
 - **Embedding throughput:** `all-MiniLM-L6-v2` handles batches of 20–30 chunks in < 100 ms on CPU.
 - **Retrieval latency:** Cosine similarity over a typical session's store (100–400 chunks) completes in < 10 ms.
 - **Dominant cost:** LLM inference (Bedrock/Claude Haiku 4.5 = ~7.4 s/call), not the RAG layer.
-- **Log volume caution:** MCP `scrape_url` results can be very large (PDF scrapes > 100 MB). The `mcp_client` should truncate tool result bodies before logging at DEBUG level to avoid log rotation exhaustion.
+- **Log volume caution:** MCP `fetch_url` results can be very large (PDF scrapes > 100 MB). The `mcp_client` should truncate tool result bodies before logging at DEBUG level to avoid log rotation exhaustion.

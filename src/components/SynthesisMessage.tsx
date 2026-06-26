@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { BookOpen } from 'lucide-react';
 import { SynthesisData } from '../types/conversation';
-import { ReportViewer } from './ReportViewer';
 import { ResearchReportViewer } from './ResearchReportViewer';
 
 interface SynthesisMessageProps {
@@ -9,8 +8,6 @@ interface SynthesisMessageProps {
 }
 
 export const SynthesisMessage: React.FC<SynthesisMessageProps> = ({ synthesis }) => {
-  const [showReport, setShowReport] = useState(false);
-
   return (
     <>
       {/* ── Prompt card ── */}
@@ -35,17 +32,10 @@ export const SynthesisMessage: React.FC<SynthesisMessageProps> = ({ synthesis })
           <ResearchReportViewer
             title={synthesis.title ?? 'Research Report'}
             synthesis={synthesis.summary}
+            generatedAt={synthesis.generatedAt}
           />
         </div>
       </div>
-
-      {/* ── ReportViewer already imported, render it conditionally ── */}
-      {showReport && (
-        <ReportViewer
-          synthesis={synthesis}
-          onClose={() => setShowReport(false)}
-        />
-      )}
     </>
   );
 };
