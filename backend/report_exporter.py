@@ -229,6 +229,7 @@ def _generate_pdf(document: str, query: str, output_path: Path) -> None:
 async def export_report_pdf(
     document: str,
     query: str,
+    title: str = "",
     session_id: Optional[str] = None,
 ) -> Optional[Path]:
     """
@@ -244,7 +245,8 @@ async def export_report_pdf(
     try:
         reports_dir = _get_reports_dir()
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        slug = _query_to_slug(query)
+        slug_base = title or query
+        slug = _query_to_slug(slug_base)
         sid_part = (session_id or "cli")[:8]
         filename = f"{date_str}_{sid_part}_{slug}.pdf"
         output_path = reports_dir / filename

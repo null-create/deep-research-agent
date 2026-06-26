@@ -4,6 +4,11 @@ export interface Conversation {
   createdAt: Date;
   updatedAt: Date;
   messages: Message[];
+  /** Monotonically increasing counter of WebSocket events received for the
+   *  backend session associated with this conversation.  Used on reconnect to
+   *  determine which replay events are already in localStorage and which are
+   *  new (i.e. were emitted while the browser was closed). */
+  _eventIndex?: number;
 }
 
 export type PlanAction = 'pending' | 'approved' | 'modified' | 'denied' | 'ended';

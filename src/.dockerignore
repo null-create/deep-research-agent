@@ -9,20 +9,21 @@
 # MCP servers have their own build contexts (./mcp/*) and are unaffected.
 
 .git/
+node_modules/
 data/
 src/
 mcp/
 scripts/
 
-# Node.js dependencies and build artifacts
-src/node_modules
-src/dist
-
 # Python virtual environments and caches
-backend/venv
-backend/.venv
-backend/__pycache__
+backend/venv/
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
 
 # Runtime data that should not be baked into the image
-backend/logs
+backend/logs/
 backend/.env

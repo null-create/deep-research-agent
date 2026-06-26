@@ -868,7 +868,14 @@ class Orchestrator:
                 "\n\nRelevant prior research context (from long-term memory — "
                 "use to avoid re-investigating already-covered ground):\n"
                 + prior_memories
+                + "\n\n"
             )
+
+        # Inject the current date to aid root agent with its temporal reasoning and source evaluation
+        # (e.g. "if your training cutoff is in 2021 but today's date is 2024, you should prioritize
+        #  current sources and be skeptical of outdated info in your training data").
+        current_time = datetime.now(timezone.utc).today().strftime("%m:%d:%Y")
+        plan_prompt += f"\n\nCurrent date: {current_time}\n\n"
 
         root_messages = [
             Message(role="system", content=self._root_system_prompt()),
@@ -1797,7 +1804,7 @@ class Orchestrator:
             "- A short section title\n"
             "- One sentence describing what the section will cover\n\n"
             "Return a JSON object:\n"
-            '{"sections": [{"title": "...", "description": "..."}, ...]}'
+            '{"report_title": "...", "sections": [{"title": "...", "description": "..."}, ...]}'
         )
 
         outline_response = await self.agents.report.run(
@@ -1822,6 +1829,7 @@ class Orchestrator:
         # Guard against None/empty content — both produce a JSONDecodeError or
         # TypeError that the except block would swallow silently.
         sections: List[Dict[str, str]] = []
+        report_title: str = query
         try:
             raw = outline_response.content or ""
             if raw.startswith("```"):
@@ -1831,7 +1839,9 @@ class Orchestrator:
             elif "```" in raw:
                 raw = raw.split("```")[1].split("```")[0].strip()
             if raw:
-                sections = json.loads(raw).get("sections", [])
+                parsed = json.loads(raw)
+                sections = parsed.get("sections", [])
+                report_title = parsed.get("report_title", query)
             else:
                 logger.warning(
                     "[Orchestrator] Outline response was empty after retry; using defaults"
@@ -2103,7 +2113,7 @@ class Orchestrator:
         ]
 
         doc_parts: List[str] = [
-            f"RESEARCH REPORT",
+            f"RESEARCH REPORT: {report_title}",
             f"Query: {query}",
             "",
         ]
@@ -2147,14 +2157,13 @@ class Orchestrator:
         try:
             from report_exporter import export_report_pdf
 
-            await export_report_pdf(document, query, self.session_id)
+            await export_report_pdf(document, query, report_title, self.session_id)
         except Exception as _pdf_exc:
             logger.warning("[Orchestrator] PDF export error: %s", _pdf_exc)
 
         # ── Extract structured metadata for downstream consumers ────────────
-        # title: query is the ground truth; report header carries no LLM-derived
-        # title in the multi-pass flow, so use the query directly.
-        report_title = query
+        # title was derived from the outline prompt during Phase A; falls back
+        # to the original query if the LLM did not supply one.
 
         # key_findings: content of the first section whose title contains
         # "finding" (case-insensitive), empty string if no such section exists.

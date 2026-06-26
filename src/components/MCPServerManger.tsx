@@ -341,6 +341,7 @@ export const MCPServerManager: React.FC = () => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState<NewServerForm>(EMPTY_FORM);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<ServerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -349,11 +350,14 @@ export const MCPServerManager: React.FC = () => {
   }, []);
 
   const loadServers = async () => {
+    setLoadError(null);
     try {
       const data = await apiClient.listMCPServers();
       setServers(data.servers || []);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error('Failed to load MCP servers:', err);
+      setLoadError(`Failed to load servers: ${msg}`);
     }
   };
 
@@ -567,6 +571,18 @@ export const MCPServerManager: React.FC = () => {
             </button>
           </div>
         </form>
+      )}
+
+      {loadError && (
+        <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+          <p className="text-sm text-red-600 dark:text-red-400">{loadError}</p>
+          <button
+            onClick={loadServers}
+            className="mt-2 text-xs text-red-600 dark:text-red-400 underline hover:no-underline"
+          >
+            Retry
+          </button>
+        </div>
       )}
 
       <div className="space-y-2">

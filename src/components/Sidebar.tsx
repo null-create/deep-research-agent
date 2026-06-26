@@ -52,7 +52,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isResearching,
 }) => {
   const [activeTab, setActiveTab] = useState<SidebarTab>('conversations');
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   const [width, setWidth] = useState(288); // default w-72 equivalent
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -79,10 +79,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
     document.body.style.userSelect = 'none';
   }, [width]);
 
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    startX.current = e.touches[0].clientX;
+    startWidth.current = width;
+    document.body.style.userSelect = 'none';
+  }, [width]);
+
+  // Auto-collapse sidebar on window resize crossing mobile breakpoint
+  useEffect(() => {
+    const handleResize = () => {
+      const isMobile = window.innerWidth < 768;
+      setIsCollapsed(isMobile);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       if (!isResizing.current) return;
       const delta = e.clientX - startX.current;
+      const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta));
+      setWidth(next);
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!isResizing.current) return;
+      const delta = e.touches[0].clientX - startX.current;
       const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta));
       setWidth(next);
     };
@@ -92,11 +116,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
+    const onTouchEnd = () => {
+      if (!isResizing.current) return;
+      isResizing.current = false;
+      document.body.style.userSelect = '';
+    };
     window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
     window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('touchend', onTouchEnd);
     return () => {
       window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('touchend', onTouchEnd);
     };
   }, []);
 

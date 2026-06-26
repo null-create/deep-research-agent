@@ -145,6 +145,24 @@ export function useConversations() {
     return conversations.find((c) => c.id === activeConversationId) || null;
   }, [conversations, activeConversationId]);
 
+  const setEventIndex = useCallback((conversationId: string, index: number) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId
+          ? { ...c, _eventIndex: index, updatedAt: new Date() }
+          : c
+      )
+    );
+  }, []);
+
+  const getEventIndex = useCallback(
+    (conversationId: string): number => {
+      const conv = conversations.find((c) => c.id === conversationId);
+      return conv?._eventIndex ?? 0;
+    },
+    [conversations]
+  );
+
   return {
     conversations,
     activeConversationId,
@@ -156,5 +174,7 @@ export function useConversations() {
     patchMessageInConversation,
     getActiveConversation,
     updateMessageInConversation,
+    setEventIndex,
+    getEventIndex,
   };
 }

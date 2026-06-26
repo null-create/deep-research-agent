@@ -13,11 +13,11 @@ import { useConversationGraphs, SYNTHESIS_NODE_ID } from './hooks/useConversatio
 import { DocsViewer } from './components/DocsViewer';
 import { apiClient } from './api/client';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:9999/ws/research';
+const WS_URL = import.meta.env.VITE_WS_URL || `${location.protocol.replace('http', 'ws')}//${location.host}/ws/research`;
 
-// sessionStorage keys — tab-scoped, cleared on browser close.
-const SS_SESSION_ID = 'deep_research_session_id';
-const SS_CONV_ID = 'deep_research_conv_id';
+// localStorage keys — survive browser close so the session can be resumed.
+const LS_SESSION_ID = 'deep_research_session_id';
+const LS_CONV_ID = 'deep_research_conv_id';
 
 const AppContent: React.FC = () => {
   const {
@@ -38,19 +38,33 @@ const AppContent: React.FC = () => {
     deleteConversation: deleteConversationFromCtx,
     planStatus,
     setPlanStatus,
+    setEventIndex,
+    getEventIndex,
   } = useApp();
 
   const [inputMode, setInputMode] = useState<'research' | 'chat'>('research');
   // Tracks which conversation owns the currently running research session.
-  // Pre-populated from sessionStorage so a page refresh can resume seamlessly.
-  const researchConvIdRef = useRef<string | null>(sessionStorage.getItem(SS_CONV_ID));
+  // Pre-populated from localStorage so a page refresh (or browser re-open)
+  // can resume seamlessly.
+  const researchConvIdRef = useRef<string | null>(localStorage.getItem(LS_CONV_ID));
   // Tracks the active backend session_id so we can resume after a disconnect.
-  // Pre-populated from sessionStorage so a page refresh can resume seamlessly.
-  const activeSessionIdRef = useRef<string | null>(sessionStorage.getItem(SS_SESSION_ID));
-  // Counts how many replay events are still outstanding after a resume-from-refresh.
-  // addMessageToConv calls are suppressed while this is > 0 to prevent duplicating
-  // messages that are already persisted in localStorage conversation history.
+  // Pre-populated from localStorage so it survives browser close.
+  const activeSessionIdRef = useRef<string | null>(localStorage.getItem(LS_SESSION_ID));
+  // Counts how many replay events are still outstanding after a resume.
+  // addMessageToConv calls are suppressed while this is > 0 to prevent
+  // duplicating messages already persisted in localStorage conversation history.
   const replayCountRef = useRef<number>(0);
+  // Total events in the current replay batch (set from session_resumed.event_count).
+  // Used to detect when replay finishes and update storedEventIndex.
+  const replayTotalRef = useRef<number>(0);
+  // The event_count from the most recent session_resumed message, retained so we
+  // can persist it to the Conversation's _eventIndex once replay completes.
+  const pendingTotalEventsRef = useRef<number>(0);
+  // Running count of ALL non-control WebSocket events received for the current
+  // session.  Incremented during normal operation and during replay (for
+  // non-suppressed events only).  Flushed to the Conversation's _eventIndex
+  // field in localStorage so it survives browser close.
+  const activeEventIndexRef = useRef<number>(0);
 
   const [currentStatus, setCurrentStatus] = useState<string>('Researching');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
@@ -108,7 +122,7 @@ const AppContent: React.FC = () => {
   // the backend to resume it, which causes the full replay log to be streamed
   // back so the UI can restore its live state.
   const handleInitialConnect = useCallback(() => {
-    const sessionId = sessionStorage.getItem(SS_SESSION_ID);
+    const sessionId = localStorage.getItem(LS_SESSION_ID);
     if (!sessionId) return;
     console.log('[ws] Initial connect — resuming stored session', sessionId);
     sendMessageRef.current?.({ type: 'resume', session_id: sessionId });
@@ -174,41 +188,77 @@ const AppContent: React.FC = () => {
         continue;
       }
 
-      // Mark whether this is a replayed historical event so we can suppress
-      // duplicate addMessageToConv calls (chat history already in localStorage).
-      // session_created and session_resumed are control messages, not replay events.
+      // Track event index: every non-control event from the backend
+      // (whether from the initial stream or from a replay drain) counts
+      // as one event.  We use this to know how many events are already
+      // persisted in localStorage after a future reconnect.
+      //
+      // During replay the total event count is known upfront
+      // (replayTotalRef.current).  Events with an index below
+      // replayCountRef.current are already in localStorage and are
+      // suppressed to avoid duplication.  Events above that threshold
+      // are new (emitted while we were disconnected) and flow through.
       let isReplayedEvent = false;
-      if (type !== 'session_created' && type !== 'session_resumed' && replayCountRef.current > 0) {
-        replayCountRef.current--;
-        isReplayedEvent = true;
+      const isControlEvent =
+        type === 'session_created' || type === 'session_resumed';
+      if (!isControlEvent) {
+        if (replayTotalRef.current > 0) {
+          replayTotalRef.current--;
+        }
+        if (replayCountRef.current > 0) {
+          replayCountRef.current--;
+          isReplayedEvent = true;
+        }
       }
 
       switch (type) {
         // ── Session lifecycle ──────────────────────────────────────────────
         case 'session_created':
-          // Store the session_id so we can send a resume message on reconnect
-          // or hard refresh.
+          // Store the session_id + conv_id in localStorage so we can send a
+          // resume message on reconnect, hard refresh, or even browser re-open.
           activeSessionIdRef.current = rawMessage.session_id ?? null;
           if (rawMessage.session_id) {
-            sessionStorage.setItem(SS_SESSION_ID, rawMessage.session_id);
+            localStorage.setItem(LS_SESSION_ID, rawMessage.session_id);
+          }
+          // Reset the event index for this brand-new session
+          activeEventIndexRef.current = 0;
+          if (researchConvIdRef.current) {
+            setEventIndex(researchConvIdRef.current, 0);
           }
           console.log('[ws] Session created:', rawMessage.session_id);
           break;
 
         case 'session_resumed': {
-          console.log('[ws] Session resumed:', rawMessage.session_id, '— replaying', rawMessage.event_count, 'event(s)');
-          // Restore session refs that may have been lost on a hard page refresh.
+          const totalEvents = rawMessage.event_count ?? 0;
+          console.log('[ws] Session resumed:', rawMessage.session_id, '— total events:', totalEvents);
+          // Restore session refs that may have been lost on a hard page refresh
+          // or browser re-open.
           if (rawMessage.session_id) {
             activeSessionIdRef.current = rawMessage.session_id;
           }
-          const storedConvId = sessionStorage.getItem(SS_CONV_ID);
+          const storedConvId = localStorage.getItem(LS_CONV_ID);
           if (!researchConvIdRef.current && storedConvId) {
             researchConvIdRef.current = storedConvId;
           }
-          // Seed the replay counter so subsequent events in the replay log do
-          // not duplicate messages already present in localStorage history.
-          replayCountRef.current = rawMessage.event_count ?? 0;
-          setCurrentStatus(rawMessage.complete ? 'Research Complete' : 'Reconnected — resuming…');
+          // Decide how many replay events to suppress.  Events with an index
+          // below the storedEventIndex are already in localStorage and should
+          // NOT produce duplicate messages.  Events above it are new (emitted
+          // while the browser was closed) and MUST flow through normally.
+          const storedIndex = researchConvIdRef.current
+            ? getEventIndex(researchConvIdRef.current)
+            : 0;
+          const eventsToSuppress = Math.min(storedIndex, totalEvents);
+          replayCountRef.current = eventsToSuppress;
+          replayTotalRef.current = totalEvents;
+          pendingTotalEventsRef.current = totalEvents;
+          setCurrentStatus(
+            rawMessage.complete ? 'Research Complete' : 'Reconnected — resuming…'
+          );
+          // Keep the researching flag true during resume if the session is
+          // still live (so the UI shows the spinner / control bar).
+          if (!rawMessage.complete) {
+            setIsResearching(true);
+          }
           // Notify the user that we've reconnected successfully.
           if (researchConvIdRef.current) {
             addMessageToConv(researchConvIdRef.current, {
@@ -303,8 +353,8 @@ const AppContent: React.FC = () => {
           setIsResearching(false);
           setCurrentStatus('Plan Denied');
           activeSessionIdRef.current = null;
-          sessionStorage.removeItem(SS_SESSION_ID);
-          sessionStorage.removeItem(SS_CONV_ID);
+          localStorage.removeItem(LS_SESSION_ID);
+          localStorage.removeItem(LS_CONV_ID);
           resetResearch();
           resetGraph(researchConvIdRef.current!);
 
@@ -461,8 +511,8 @@ const AppContent: React.FC = () => {
           setCurrentStatus('Step Failed');
           // If the error came from a failed resume attempt, clear the stored
           // session so we don't keep retrying on the next page load.
-          sessionStorage.removeItem(SS_SESSION_ID);
-          sessionStorage.removeItem(SS_CONV_ID);
+          localStorage.removeItem(LS_SESSION_ID);
+          localStorage.removeItem(LS_CONV_ID);
           activeSessionIdRef.current = null;
           if (researchConvIdRef.current) {
             setResearchEndTime(researchConvIdRef.current, new Date().toISOString());
@@ -503,8 +553,8 @@ const AppContent: React.FC = () => {
           // Session is fully complete — clear stored IDs so future page loads
           // do not attempt to resume a finished session.
           activeSessionIdRef.current = null;
-          sessionStorage.removeItem(SS_SESSION_ID);
-          sessionStorage.removeItem(SS_CONV_ID);
+          localStorage.removeItem(LS_SESSION_ID);
+          localStorage.removeItem(LS_CONV_ID);
           // Mark the synthesis graph node as completed
           setNodeCompleted(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
           // Timer: mark end time
@@ -545,8 +595,8 @@ const AppContent: React.FC = () => {
           setIsResearching(false);
           setCurrentStatus('');
           activeSessionIdRef.current = null;
-          sessionStorage.removeItem(SS_SESSION_ID);
-          sessionStorage.removeItem(SS_CONV_ID);
+          localStorage.removeItem(LS_SESSION_ID);
+          localStorage.removeItem(LS_CONV_ID);
           setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
           resetResearch();
           resetGraph(researchConvIdRef.current!);
@@ -600,7 +650,34 @@ const AppContent: React.FC = () => {
           console.warn('Unknown WebSocket message type:', type);
           break;
       }
+
+      // ── Event index tracking ───────────────────────────────────────
+      // Every non-control non-replayed event increments the running
+      // counter so we always know how many events are accounted for
+      // in the persisted conversation state.
+      if (!isControlEvent && !isReplayedEvent) {
+        activeEventIndexRef.current++;
+      }
     } // end for (rawMessage of msgs)
+
+    // ── Post-batch bookkeeping ───────────────────────────────────────
+    // If a replay was in progress and all events have been drained,
+    // persist the final total so future reconnects are accurate.
+    if (
+      pendingTotalEventsRef.current > 0 &&
+      replayTotalRef.current === 0 &&
+      researchConvIdRef.current
+    ) {
+      setEventIndex(researchConvIdRef.current, pendingTotalEventsRef.current);
+      pendingTotalEventsRef.current = 0;
+    }
+
+    // Flush the running event index to conversation metadata every
+    // batch so events seen mid-session are preserved after a browser
+    // close.
+    if (researchConvIdRef.current) {
+      setEventIndex(researchConvIdRef.current, activeEventIndexRef.current);
+    }
   }, [
     messageQueue,
     clearMessageQueue,
@@ -623,7 +700,11 @@ const AppContent: React.FC = () => {
     setResearchStartTime,
     setResearchEndTime,
     updateOptimizePhase,
-    // researchConvIdRef / optimizeConvIdRef are refs; no need to list them
+    getEventIndex,
+    setEventIndex,
+    // researchConvIdRef / optimizeConvIdRef / replayTotalRef /
+    // pendingTotalEventsRef / activeEventIndexRef are refs;
+    // no need to list them
   ]);
 
   // =====================
@@ -671,7 +752,7 @@ const AppContent: React.FC = () => {
         convId = newConv.id;
       }
       researchConvIdRef.current = convId;
-      sessionStorage.setItem(SS_CONV_ID, convId);
+      localStorage.setItem(LS_CONV_ID, convId);
 
       addMessageToConv(convId, {
         id: crypto.randomUUID(),
@@ -931,11 +1012,11 @@ const AppContent: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
               </button>
-              <h1 className="text-lg font-semibold text-gray-900 dark:text-white">
+              <h1 className="text-lg font-semibold text-gray-900 dark:text-white truncate min-w-0">
                 Deep Research Agent
               </h1>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 sm:gap-4">
               <button
                 onClick={toggleTheme}
                 className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
@@ -953,38 +1034,42 @@ const AppContent: React.FC = () => {
                   </svg>
                 )}
               </button>
-              {/* Docs button */}
+              {/* Docs button - hidden on mobile */}
               <button
                 onClick={() => setShowDocs(true)}
-                className="px-3 py-1 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                className="hidden sm:block px-3 py-1 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                 title="View documentation"
               >
                 Docs
               </button>
-              {/* Chat / Graph view toggle */}
-              <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5">
+              {/* Chat / Graph view toggle - compact on mobile */}
+              <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-0.5 gap-0.5">
                 <button
                   onClick={() => setActiveView('chat')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeView === 'chat'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                    activeView === 'chat'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
                   title="Switch to Chat view"
                 >
-                  Chat
+                  <span className="hidden sm:inline">Chat</span>
+                  <span className="sm:hidden">💬</span>
                 </button>
                 <button
                   onClick={() => setActiveView('graph')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeView === 'graph'
+                  className={`px-2 sm:px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                    activeView === 'graph'
                     ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
                     }`}
                   title="Switch to Execution Graph view"
                 >
-                  Graph
+                  <span className="hidden sm:inline">Graph</span>
+                  <span className="sm:hidden">📊</span>
                 </button>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 sm:gap-2">
                 <div
                   className={`w-2 h-2 rounded-full ${isConnected
                     ? 'bg-green-500'
@@ -993,7 +1078,7 @@ const AppContent: React.FC = () => {
                       : 'bg-red-500'
                     }`}
                 />
-                <span className="text-xs text-gray-500 dark:text-gray-400">
+                <span className="hidden sm:inline text-xs text-gray-500 dark:text-gray-400">
                   {isConnected
                     ? 'Connected'
                     : isReconnecting
