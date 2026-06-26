@@ -16,7 +16,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   const [isReconnecting, setIsReconnecting] = useState(false);
   // Use a ref-backed queue so drain is atomic (no snapshot-vs-clear race).
   const messageBufferRef = useRef<any[]>([]);
-  const [, setQueueVersion] = useState(0);
+  const [messageCount, setMessageCount] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -100,7 +100,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
       } catch {
         messageBufferRef.current.push(event.data);
       }
-      setQueueVersion((v) => v + 1);
+      setMessageCount((v) => v + 1);
     };
 
     ws.onclose = () => {
@@ -139,6 +139,11 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
     return messageBufferRef.current.splice(0);
   }, []);
 
+  /** Removes and returns the first queued message, or undefined if empty. */
+  const shiftMessage = useCallback((): any | undefined => {
+    return messageBufferRef.current.shift();
+  }, []);
+
   useEffect(() => {
     connect();
     return () => {
@@ -150,5 +155,5 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
     };
   }, [connect]);
 
-  return { isConnected, isReconnecting, drainMessageQueue, sendMessage, reconnect };
+  return { isConnected, isReconnecting, drainMessageQueue, sendMessage, reconnect, messageCount, shiftMessage };
 }

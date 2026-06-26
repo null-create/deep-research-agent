@@ -150,6 +150,8 @@ const AppContent: React.FC = () => {
     drainMessageQueue,
     sendMessage,
     reconnect,
+    messageCount,
+    shiftMessage,
   } = useWebSocket(WS_URL, { onReconnected: handleReconnected, onInitialConnect: handleInitialConnect });
 
   // Keep the ref in sync so handleReconnected can always see the latest sendMessage.
@@ -187,491 +189,489 @@ const AppContent: React.FC = () => {
   // =====================
 
   useEffect(() => {
-    const msgs = drainMessageQueue();
-    if (!msgs.length) return;
+    const rawMessage = shiftMessage();
+    if (!rawMessage) return;
 
-    for (const rawMessage of msgs) {
-      const { type, data, message, plan } = rawMessage;
-      console.log('Received WebSocket message:', rawMessage);
+    const { type, data, message, plan } = rawMessage;
+    console.log('Received WebSocket message:', rawMessage);
 
-      if (!type) {
-        console.warn('Received message with no type:', rawMessage);
-        continue;
+    if (!type) {
+      console.warn('Received message with no type:', rawMessage);
+      return;
+    }
+
+    // Track event index: every non-control event from the backend
+    // (whether from the initial stream or from a replay drain) counts
+    // as one event.  We use this to know how many events are already
+    // persisted in localStorage after a future reconnect.
+    //
+    // During replay the total event count is known upfront
+    // (replayTotalRef.current).  Events with an index below
+    // replayCountRef.current are already in localStorage and are
+    // suppressed to avoid duplication.  Events above that threshold
+    // are new (emitted while we were disconnected) and flow through.
+    let isReplayedEvent = false;
+    const isControlEvent =
+      type === 'session_created' || type === 'session_resumed';
+    if (!isControlEvent) {
+      if (replayTotalRef.current > 0) {
+        replayTotalRef.current--;
       }
-
-      // Track event index: every non-control event from the backend
-      // (whether from the initial stream or from a replay drain) counts
-      // as one event.  We use this to know how many events are already
-      // persisted in localStorage after a future reconnect.
-      //
-      // During replay the total event count is known upfront
-      // (replayTotalRef.current).  Events with an index below
-      // replayCountRef.current are already in localStorage and are
-      // suppressed to avoid duplication.  Events above that threshold
-      // are new (emitted while we were disconnected) and flow through.
-      let isReplayedEvent = false;
-      const isControlEvent =
-        type === 'session_created' || type === 'session_resumed';
-      if (!isControlEvent) {
-        if (replayTotalRef.current > 0) {
-          replayTotalRef.current--;
-        }
-        if (replayCountRef.current > 0) {
-          replayCountRef.current--;
-          isReplayedEvent = true;
-        }
+      if (replayCountRef.current > 0) {
+        replayCountRef.current--;
+        isReplayedEvent = true;
       }
+    }
 
-      switch (type) {
-        // ── Session lifecycle ──────────────────────────────────────────────
-        case 'session_created':
-          // Store the session_id + conv_id in localStorage so we can send a
-          // resume message on reconnect, hard refresh, or even browser re-open.
-          activeSessionIdRef.current = rawMessage.session_id ?? null;
-          if (rawMessage.session_id) {
-            localStorage.setItem(LS_SESSION_ID, rawMessage.session_id);
-          }
-          // Reset the event index for this brand-new session
-          activeEventIndexRef.current = 0;
-          if (researchConvIdRef.current) {
-            setEventIndex(researchConvIdRef.current, 0);
-          }
-          console.log('[ws] Session created:', rawMessage.session_id);
-          break;
-
-        case 'session_resumed': {
-          const totalEvents = rawMessage.event_count ?? 0;
-          console.log('[ws] Session resumed:', rawMessage.session_id, '— total events:', totalEvents);
-          // Restore session refs that may have been lost on a hard page refresh
-          // or browser re-open.
-          if (rawMessage.session_id) {
-            activeSessionIdRef.current = rawMessage.session_id;
-          }
-          const storedConvId = localStorage.getItem(LS_CONV_ID);
-          if (!researchConvIdRef.current && storedConvId) {
-            researchConvIdRef.current = storedConvId;
-          }
-          // Decide how many replay events to suppress.  Events with an index
-          // below the storedEventIndex are already in localStorage and should
-          // NOT produce duplicate messages.  Events above it are new (emitted
-          // while the browser was closed) and MUST flow through normally.
-          const storedIndex = researchConvIdRef.current
-            ? getEventIndex(researchConvIdRef.current)
-            : 0;
-          const eventsToSuppress = Math.min(storedIndex, totalEvents);
-          replayCountRef.current = eventsToSuppress;
-          replayTotalRef.current = totalEvents;
-          pendingTotalEventsRef.current = totalEvents;
-          setCurrentStatus(
-            rawMessage.complete ? 'Research Complete' : 'Reconnected — resuming…'
-          );
-          // Keep the researching flag true during resume if the session is
-          // still live (so the UI shows the spinner / control bar).
-          if (!rawMessage.complete) {
-            setIsResearching(true);
-          }
-          // Notify the user that we've reconnected successfully.
-          if (researchConvIdRef.current) {
-            addMessageToConv(researchConvIdRef.current, {
-              id: generateId(),
-              role: 'system',
-              type: 'system',
-              content: rawMessage.complete
-                ? '🔄 Reconnected. Research had already finished — replaying results.'
-                : '🔄 Reconnected to backend. Resuming research in progress…',
-              timestamp: new Date(),
-            });
-          }
-          break;
+    switch (type) {
+      // ── Session lifecycle ──────────────────────────────────────────────
+      case 'session_created':
+        // Store the session_id + conv_id in localStorage so we can send a
+        // resume message on reconnect, hard refresh, or even browser re-open.
+        activeSessionIdRef.current = rawMessage.session_id ?? null;
+        if (rawMessage.session_id) {
+          localStorage.setItem(LS_SESSION_ID, rawMessage.session_id);
         }
-
-        case 'status':
-          console.log('Status update:', message);
-          setCurrentStatus(message || data?.message || 'Researching');
-
-          // Graph: explicit batch data from the v2 orchestrator
-          if (data?.batches) {
-            overrideBatches(researchConvIdRef.current!, data.batches);
-          }
-          // Graph: parse sub-agent progress lines emitted by the orchestrator
-          if (message) {
-            // [Search] any message for step N → search running
-            // Matches both initial gather and targeted re-search
-            const searchMatch = message.match(/\[Search\].*step\s+(\d+)/i);
-            if (searchMatch) {
-              updateSubAgent(researchConvIdRef.current!, parseInt(searchMatch[1], 10), 'search', 'running');
-            }
-            // [Analyst] any message for step N → search completed, analyst running
-            // Matches both "Extracting claims" and "Re-extracting claims"
-            const analystMatch = message.match(/\[Analyst\].*step\s+(\d+)/i);
-            if (analystMatch) {
-              updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'search', 'completed');
-              updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'analyst', 'running');
-            }
-            // [QA] Auditing → analyst completed, QA running
-            const qaAuditMatch = message.match(/\[QA\] Auditing.*step\s+(\d+)/i);
-            if (qaAuditMatch) {
-              updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'analyst', 'completed');
-              updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'qa', 'running');
-            }
-            // [QA] contradiction(s) flagged → attach contradiction data
-            const qaFlagMatch = message.match(/\[QA\].*contradiction.*step\s+(\d+)/i);
-            if (qaFlagMatch) {
-              addContradictions(researchConvIdRef.current!, parseInt(qaFlagMatch[1], 10), data?.contradictions ?? []);
-            }
-            // [QA retry N/N] → increment retry badge; search/analyst transitions
-            // are handled by the subsequent [Search] and [Analyst] messages above
-            const qaRetryMatch = message.match(/\[QA retry.*?\].*step\s+(\d+)/i);
-            if (qaRetryMatch) {
-              incrementQaRetries(researchConvIdRef.current!, parseInt(qaRetryMatch[1], 10));
-            }
-            // Synthesis phases starting — synthesis node is already running
-            // (set to running in the research_complete handler below)
-          }
-          break;
-
-        case 'plan': {
-          console.log('Received research plan:', plan);
-          setCurrentStatus('Planning');
-          setIsResearching(false);
-          setPlanStatus('pending');
-
-          // Build initial graph from the incoming plan only for live events;
-          // during replay the graph is already restored from localStorage.
-          if (plan && !isReplayedEvent) {
-            initFromPlan(researchConvIdRef.current!, plan);
-          }
-
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'plan_approval',
-              content: 'I have created a research plan. Please review it below.',
-              data: {
-                plan: plan,
-                planAction: 'pending',
-              },
-              timestamp: new Date(),
-            });
-          }
-          break;
+        // Reset the event index for this brand-new session
+        activeEventIndexRef.current = 0;
+        if (researchConvIdRef.current) {
+          setEventIndex(researchConvIdRef.current, 0);
         }
+        console.log('[ws] Session created:', rawMessage.session_id);
+        break;
 
-        case 'plan_denied':
-          console.log('Plan denied by user.');
-          setPlanStatus('denied');
-          setIsResearching(false);
-          setCurrentStatus('Plan Denied');
-          activeSessionIdRef.current = null;
-          localStorage.removeItem(LS_SESSION_ID);
-          localStorage.removeItem(LS_CONV_ID);
-          resetResearch();
-          resetGraph(researchConvIdRef.current!);
-
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'system',
-              content: 'The research plan was denied. Please submit a new query to start again.',
-              timestamp: new Date(),
-            });
-          }
-          break;
-
-        case 'step_start':
-          console.log('Starting step:', data?.step);
+      case 'session_resumed': {
+        const totalEvents = rawMessage.event_count ?? 0;
+        console.log('[ws] Session resumed:', rawMessage.session_id, '— total events:', totalEvents);
+        // Restore session refs that may have been lost on a hard page refresh
+        // or browser re-open.
+        if (rawMessage.session_id) {
+          activeSessionIdRef.current = rawMessage.session_id;
+        }
+        const storedConvId = localStorage.getItem(LS_CONV_ID);
+        if (!researchConvIdRef.current && storedConvId) {
+          researchConvIdRef.current = storedConvId;
+        }
+        // Decide how many replay events to suppress.  Events with an index
+        // below the storedEventIndex are already in localStorage and should
+        // NOT produce duplicate messages.  Events above it are new (emitted
+        // while the browser was closed) and MUST flow through normally.
+        const storedIndex = researchConvIdRef.current
+          ? getEventIndex(researchConvIdRef.current)
+          : 0;
+        const eventsToSuppress = Math.min(storedIndex, totalEvents);
+        replayCountRef.current = eventsToSuppress;
+        replayTotalRef.current = totalEvents;
+        pendingTotalEventsRef.current = totalEvents;
+        setCurrentStatus(
+          rawMessage.complete ? 'Research Complete' : 'Reconnected — resuming…'
+        );
+        // Keep the researching flag true during resume if the session is
+        // still live (so the UI shows the spinner / control bar).
+        if (!rawMessage.complete) {
           setIsResearching(true);
-          setCurrentStatus('Starting Step: ' + (data?.step?.name || 'Unknown Step'));
-          // Graph: mark this node as running
-          if (data?.step?.id != null) {
-            setNodeRunning(researchConvIdRef.current!, data.step.id);
-          }
+        }
+        // Notify the user that we've reconnected successfully.
+        if (researchConvIdRef.current) {
+          addMessageToConv(researchConvIdRef.current, {
+            id: generateId(),
+            role: 'system',
+            type: 'system',
+            content: rawMessage.complete
+              ? '🔄 Reconnected. Research had already finished — replaying results.'
+              : '🔄 Reconnected to backend. Resuming research in progress…',
+            timestamp: new Date(),
+          });
+        }
+        break;
+      }
 
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'step_start',
-              content: `Starting step: ${data?.step?.description || 'Unknown Step'}`,
-              data,
-              timestamp: new Date(),
-            });
-          }
-          break;
+      case 'status':
+        console.log('Status update:', message);
+        setCurrentStatus(message || data?.message || 'Researching');
 
-        case 'step_complete':
-          console.log('Completed step:', data?.step);
-          setCurrentStatus('Step Completed: ' + (data?.step?.name || 'Unknown Step'));
-          // Graph: mark node completed, attach result & tools
-          if (data?.step?.id != null) {
-            setNodeCompleted(
-              researchConvIdRef.current!,
-              data.step.id,
-              data.step.result,
-              Array.isArray(data.tools_used) ? data.tools_used : undefined
-            );
+        // Graph: explicit batch data from the v2 orchestrator
+        if (data?.batches) {
+          overrideBatches(researchConvIdRef.current!, data.batches);
+        }
+        // Graph: parse sub-agent progress lines emitted by the orchestrator
+        if (message) {
+          // [Search] any message for step N → search running
+          // Matches both initial gather and targeted re-search
+          const searchMatch = message.match(/\[Search\].*step\s+(\d+)/i);
+          if (searchMatch) {
+            updateSubAgent(researchConvIdRef.current!, parseInt(searchMatch[1], 10), 'search', 'running');
           }
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'step_complete',
-              content: data?.skipped_synthesis
-                ? `Skipped step: ${data?.step?.description || 'synthesis step'} — report synthesis is handled automatically by the ReportComposer.`
-                : `Completed step: ${data?.step?.name || 'Unknown Step'}`,
-              data,
-              timestamp: new Date(),
-            });
+          // [Analyst] any message for step N → search completed, analyst running
+          // Matches both "Extracting claims" and "Re-extracting claims"
+          const analystMatch = message.match(/\[Analyst\].*step\s+(\d+)/i);
+          if (analystMatch) {
+            updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'search', 'completed');
+            updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'analyst', 'running');
           }
-          break;
+          // [QA] Auditing → analyst completed, QA running
+          const qaAuditMatch = message.match(/\[QA\] Auditing.*step\s+(\d+)/i);
+          if (qaAuditMatch) {
+            updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'analyst', 'completed');
+            updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'qa', 'running');
+          }
+          // [QA] contradiction(s) flagged → attach contradiction data
+          const qaFlagMatch = message.match(/\[QA\].*contradiction.*step\s+(\d+)/i);
+          if (qaFlagMatch) {
+            addContradictions(researchConvIdRef.current!, parseInt(qaFlagMatch[1], 10), data?.contradictions ?? []);
+          }
+          // [QA retry N/N] → increment retry badge; search/analyst transitions
+          // are handled by the subsequent [Search] and [Analyst] messages above
+          const qaRetryMatch = message.match(/\[QA retry.*?\].*step\s+(\d+)/i);
+          if (qaRetryMatch) {
+            incrementQaRetries(researchConvIdRef.current!, parseInt(qaRetryMatch[1], 10));
+          }
+          // Synthesis phases starting — synthesis node is already running
+          // (set to running in the research_complete handler below)
+        }
+        break;
 
-        case 'step_failed': {
-          // The backend sends `error` and `message` at the top level; `data` may be null
-          const stepError = rawMessage.error;
-          console.log('Step failed:', message, 'Error:', stepError);
-          setCurrentStatus('Step Failed');
-          // Graph: mark node failed
-          if (data?.step?.id != null) {
-            setNodeFailed(researchConvIdRef.current!, data.step.id, stepError ?? undefined);
-          }
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'step_failed',
-              content: `${message || 'Step failed'}. Error: ${stepError || 'Unknown error.'}`,
-              data: {
-                step: {
-                  name: message || 'Unknown Step',
-                  description: message || '',
-                  error: stepError || 'Unknown error.',
-                },
-              },
-              timestamp: new Date(),
-            });
-          }
-          break;
+      case 'plan': {
+        console.log('Received research plan:', plan);
+        setCurrentStatus('Planning');
+        setIsResearching(false);
+        setPlanStatus('pending');
+
+        // Build initial graph from the incoming plan only for live events;
+        // during replay the graph is already restored from localStorage.
+        if (plan && !isReplayedEvent) {
+          initFromPlan(researchConvIdRef.current!, plan);
         }
 
-        case 'research_complete':
-          console.log('Research complete:', data);
-          setIsResearching(false);
-          setCurrentStatus('Complete');
-          // Freeze the timer — pipeline is done
-          setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
-          // Add the synthesis node and mark it running only for live events;
-          // during replay the graph node already exists in localStorage.
-          if (!isReplayedEvent) {
-            addSynthesisNode(researchConvIdRef.current!);
-            setNodeRunning(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
-          }
-          // Session is still alive until 'report' arrives; keep activeSessionIdRef.
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'research_complete',
-              content: message || (data?.content ?? 'Research complete.'),
-              data,
-              timestamp: new Date(),
-            });
-          }
-          break;
-
-        case 'synthesis': {
-          console.log('Received synthesis result:', data);
-          setCurrentStatus('Synthesized Results');
-          // Compose a complete markdown summary so the PDF report captures all sections
-          const synthParts: string[] = [];
-          if (data?.summary) synthParts.push(`## Summary\n${data.summary}`);
-          if (data?.key_insights?.length) synthParts.push(`## Key Insights\n${(data.key_insights as string[]).map((i: string) => `- ${i}`).join('\n')}`);
-          if (data?.patterns?.length) synthParts.push(`## Patterns\n${(data.patterns as string[]).map((p: string) => `- ${p}`).join('\n')}`);
-          if (data?.recommendations?.length) synthParts.push(`## Recommendations\n${(data.recommendations as string[]).map((r: string) => `- ${r}`).join('\n')}`);
-          if (data?.creative_applications?.length) synthParts.push(`## Creative Applications\n${(data.creative_applications as string[]).map((a: string) => `- ${a}`).join('\n')}`);
-          if (data?.knowledge_gaps?.length) synthParts.push(`## Knowledge Gaps\n${(data.knowledge_gaps as string[]).map((g: string) => `- ${g}`).join('\n')}`);
-          const formattedSummary = synthParts.join('\n\n') || data?.summary || message || 'No synthesis data available.';
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'synthesis',
-              content: message || 'Synthesis complete.',
-              data: {
-                synthesis: {
-                  title: 'Research Report',
-                  summary: formattedSummary,
-                  generatedAt: new Date().toISOString(),
-                  key_insights: data?.key_insights,
-                  patterns: data?.patterns,
-                  recommendations: data?.recommendations,
-                  creative_applications: data?.creative_applications,
-                  knowledge_gaps: data?.knowledge_gaps,
-                },
-              },
-              timestamp: new Date(),
-            });
-          }
-          break;
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'plan_approval',
+            content: 'I have created a research plan. Please review it below.',
+            data: {
+              plan: plan,
+              planAction: 'pending',
+            },
+            timestamp: new Date(),
+          });
         }
+        break;
+      }
 
-        case 'error':
-          console.error('Error received:', message, data);
-          setIsResearching(false);
-          setCurrentStatus('Step Failed');
-          // If the error came from a failed resume attempt, clear the stored
-          // session so we don't keep retrying on the next page load.
-          localStorage.removeItem(LS_SESSION_ID);
-          localStorage.removeItem(LS_CONV_ID);
-          activeSessionIdRef.current = null;
-          if (researchConvIdRef.current) {
-            setResearchEndTime(researchConvIdRef.current, new Date().toISOString());
-          }
-          if (!isReplayedEvent && researchConvIdRef.current) {
-            addMessageToConv(researchConvIdRef.current, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'error',
-              content: message || (data?.message ?? 'An unexpected error occurred.'),
-              data: data ?? {},
-              timestamp: new Date(),
-            });
-          }
-          break;
+      case 'plan_denied':
+        console.log('Plan denied by user.');
+        setPlanStatus('denied');
+        setIsResearching(false);
+        setCurrentStatus('Plan Denied');
+        activeSessionIdRef.current = null;
+        localStorage.removeItem(LS_SESSION_ID);
+        localStorage.removeItem(LS_CONV_ID);
+        resetResearch();
+        resetGraph(researchConvIdRef.current!);
 
-        case 'synthesis_progress': {
-          const secIdx = data?.section_index as number | undefined;
-          const secTitle = data?.section_title as string | undefined;
-          const totalSecs = data?.total_sections as number | undefined;
-          const progressMsg = secIdx && totalSecs
-            ? `Drafting section ${secIdx} of ${totalSecs}: ${secTitle ?? ''}…`
-            : message || 'Drafting report…';
-          setCurrentStatus(progressMsg);
-          // Re-enable the "in progress" spinner so users see activity between
-          // research_complete and the final report event.
-          if (secIdx === 1) {
-            setIsResearching(true);
-          }
-          break;
-        }
-
-        case 'report': {
-          // v2 Orchestrator endpoint — full document in data.document
-          console.log('Received research report:', data);
-          setIsResearching(false);
-          setCurrentStatus('Report Ready');
-          // Session is fully complete — clear stored IDs so future page loads
-          // do not attempt to resume a finished session.
-          activeSessionIdRef.current = null;
-          localStorage.removeItem(LS_SESSION_ID);
-          localStorage.removeItem(LS_CONV_ID);
-          // Mark the synthesis graph node as completed
-          setNodeCompleted(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
-          // Timer: mark end time
-          setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
-          if (!isReplayedEvent) {
-            addMessageToConv(researchConvIdRef.current!, {
-              id: generateId(),
-              role: 'assistant',
-              type: 'report',
-              content: message || 'Research report complete.',
-              data: {
-                synthesis: {
-                  title: data?.title ?? 'Research Report',
-                  summary: data?.document ?? message ?? 'No report content available.',
-                  key_findings: data?.key_findings,
-                  sources: data?.sources,
-                  generatedAt: new Date().toISOString(),
-                },
-              },
-              timestamp: new Date(),
-            });
-          }
-          break;
-        }
-
-        case 'research_paused':
-          console.log('Research paused acknowledged:', message);
-          setCurrentStatus('Paused');
-          break;
-
-        case 'research_resumed':
-          console.log('Research resumed acknowledged:', message);
-          setCurrentStatus('Researching');
-          break;
-
-        case 'research_stopped':
-          console.log('Research stopped acknowledged:', message);
-          setIsResearching(false);
-          setCurrentStatus('');
-          activeSessionIdRef.current = null;
-          localStorage.removeItem(LS_SESSION_ID);
-          localStorage.removeItem(LS_CONV_ID);
-          setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
-          resetResearch();
-          resetGraph(researchConvIdRef.current!);
-          break;
-
-        // ── Self-optimization workflow ──────────────────────────────────────
-        case 'optimize_started':
-          console.log('[optimize] Workflow started');
-          setIsOptimizing(true);
-          setCurrentStatus('Self-Optimizing…');
-          setActiveView('graph');
-          break;
-
-        case 'optimize_progress': {
-          if (isReplayedEvent) break;
-          const phase = data?.phase;
-          const phaseStatus = data?.status;
-          console.log('[optimize] Phase:', phase, phaseStatus);
-          if (phase && phaseStatus && optimizeConvIdRef.current) {
-            const nodeStatus = phaseStatus === 'running' ? 'running'
-              : phaseStatus === 'completed' ? 'completed'
-                : 'failed';
-            updateOptimizePhase(optimizeConvIdRef.current, phase, nodeStatus);
-          }
-          setCurrentStatus(message || 'Optimizing…');
-          addMessageToConv(optimizeConvIdRef.current!, {
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
             id: generateId(),
             role: 'assistant',
             type: 'system',
-            content: message || 'Optimization in progress…',
+            content: 'The research plan was denied. Please submit a new query to start again.',
             timestamp: new Date(),
           });
-          break;
+        }
+        break;
+
+      case 'step_start':
+        console.log('Starting step:', data?.step);
+        setIsResearching(true);
+        setCurrentStatus('Starting Step: ' + (data?.step?.name || 'Unknown Step'));
+        // Graph: mark this node as running
+        if (data?.step?.id != null) {
+          setNodeRunning(researchConvIdRef.current!, data.step.id);
         }
 
-        case 'optimize_complete': {
-          if (isReplayedEvent) break;
-          console.log('[optimize] Complete:', data);
-          setIsOptimizing(false);
-          setCurrentStatus('Optimization Complete');
-          const methodsCount = data?.new_methods_count ?? 0;
-          addMessageToConv(optimizeConvIdRef.current!, {
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
             id: generateId(),
             role: 'assistant',
-            type: 'system',
-            content: `✅ Self-optimization complete. ${methodsCount} new research method(s) integrated into RESEARCH-METHODS.md.`,
+            type: 'step_start',
+            content: `Starting step: ${data?.step?.description || 'Unknown Step'}`,
+            data,
             timestamp: new Date(),
           });
-          break;
         }
+        break;
 
-        default:
-          console.warn('Unknown WebSocket message type:', type);
-          break;
+      case 'step_complete':
+        console.log('Completed step:', data?.step);
+        setCurrentStatus('Step Completed: ' + (data?.step?.name || 'Unknown Step'));
+        // Graph: mark node completed, attach result & tools
+        if (data?.step?.id != null) {
+          setNodeCompleted(
+            researchConvIdRef.current!,
+            data.step.id,
+            data.step.result,
+            Array.isArray(data.tools_used) ? data.tools_used : undefined
+          );
+        }
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'step_complete',
+            content: data?.skipped_synthesis
+              ? `Skipped step: ${data?.step?.description || 'synthesis step'} — report synthesis is handled automatically by the ReportComposer.`
+              : `Completed step: ${data?.step?.name || 'Unknown Step'}`,
+            data,
+            timestamp: new Date(),
+          });
+        }
+        break;
+
+      case 'step_failed': {
+        // The backend sends `error` and `message` at the top level; `data` may be null
+        const stepError = rawMessage.error;
+        console.log('Step failed:', message, 'Error:', stepError);
+        setCurrentStatus('Step Failed');
+        // Graph: mark node failed
+        if (data?.step?.id != null) {
+          setNodeFailed(researchConvIdRef.current!, data.step.id, stepError ?? undefined);
+        }
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'step_failed',
+            content: `${message || 'Step failed'}. Error: ${stepError || 'Unknown error.'}`,
+            data: {
+              step: {
+                name: message || 'Unknown Step',
+                description: message || '',
+                error: stepError || 'Unknown error.',
+              },
+            },
+            timestamp: new Date(),
+          });
+        }
+        break;
       }
 
-      // ── Event index tracking ───────────────────────────────────────
-      // Every non-control non-replayed event increments the running
-      // counter so we always know how many events are accounted for
-      // in the persisted conversation state.
-      if (!isControlEvent && !isReplayedEvent) {
-        activeEventIndexRef.current++;
+      case 'research_complete':
+        console.log('Research complete:', data);
+        setIsResearching(false);
+        setCurrentStatus('Complete');
+        // Freeze the timer — pipeline is done
+        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        // Add the synthesis node and mark it running only for live events;
+        // during replay the graph node already exists in localStorage.
+        if (!isReplayedEvent) {
+          addSynthesisNode(researchConvIdRef.current!);
+          setNodeRunning(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
+        }
+        // Session is still alive until 'report' arrives; keep activeSessionIdRef.
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'research_complete',
+            content: message || (data?.content ?? 'Research complete.'),
+            data,
+            timestamp: new Date(),
+          });
+        }
+        break;
+
+      case 'synthesis': {
+        console.log('Received synthesis result:', data);
+        setCurrentStatus('Synthesized Results');
+        // Compose a complete markdown summary so the PDF report captures all sections
+        const synthParts: string[] = [];
+        if (data?.summary) synthParts.push(`## Summary\n${data.summary}`);
+        if (data?.key_insights?.length) synthParts.push(`## Key Insights\n${(data.key_insights as string[]).map((i: string) => `- ${i}`).join('\n')}`);
+        if (data?.patterns?.length) synthParts.push(`## Patterns\n${(data.patterns as string[]).map((p: string) => `- ${p}`).join('\n')}`);
+        if (data?.recommendations?.length) synthParts.push(`## Recommendations\n${(data.recommendations as string[]).map((r: string) => `- ${r}`).join('\n')}`);
+        if (data?.creative_applications?.length) synthParts.push(`## Creative Applications\n${(data.creative_applications as string[]).map((a: string) => `- ${a}`).join('\n')}`);
+        if (data?.knowledge_gaps?.length) synthParts.push(`## Knowledge Gaps\n${(data.knowledge_gaps as string[]).map((g: string) => `- ${g}`).join('\n')}`);
+        const formattedSummary = synthParts.join('\n\n') || data?.summary || message || 'No synthesis data available.';
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'synthesis',
+            content: message || 'Synthesis complete.',
+            data: {
+              synthesis: {
+                title: 'Research Report',
+                summary: formattedSummary,
+                generatedAt: new Date().toISOString(),
+                key_insights: data?.key_insights,
+                patterns: data?.patterns,
+                recommendations: data?.recommendations,
+                creative_applications: data?.creative_applications,
+                knowledge_gaps: data?.knowledge_gaps,
+              },
+            },
+            timestamp: new Date(),
+          });
+        }
+        break;
       }
-    } // end for (rawMessage of msgs)
+
+      case 'error':
+        console.error('Error received:', message, data);
+        setIsResearching(false);
+        setCurrentStatus('Step Failed');
+        // If the error came from a failed resume attempt, clear the stored
+        // session so we don't keep retrying on the next page load.
+        localStorage.removeItem(LS_SESSION_ID);
+        localStorage.removeItem(LS_CONV_ID);
+        activeSessionIdRef.current = null;
+        if (researchConvIdRef.current) {
+          setResearchEndTime(researchConvIdRef.current, new Date().toISOString());
+        }
+        if (!isReplayedEvent && researchConvIdRef.current) {
+          addMessageToConv(researchConvIdRef.current, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'error',
+            content: message || (data?.message ?? 'An unexpected error occurred.'),
+            data: data ?? {},
+            timestamp: new Date(),
+          });
+        }
+        break;
+
+      case 'synthesis_progress': {
+        const secIdx = data?.section_index as number | undefined;
+        const secTitle = data?.section_title as string | undefined;
+        const totalSecs = data?.total_sections as number | undefined;
+        const progressMsg = secIdx && totalSecs
+          ? `Drafting section ${secIdx} of ${totalSecs}: ${secTitle ?? ''}…`
+          : message || 'Drafting report…';
+        setCurrentStatus(progressMsg);
+        // Re-enable the "in progress" spinner so users see activity between
+        // research_complete and the final report event.
+        if (secIdx === 1) {
+          setIsResearching(true);
+        }
+        break;
+      }
+
+      case 'report': {
+        // v2 Orchestrator endpoint — full document in data.document
+        console.log('Received research report:', data);
+        setIsResearching(false);
+        setCurrentStatus('Report Ready');
+        // Session is fully complete — clear stored IDs so future page loads
+        // do not attempt to resume a finished session.
+        activeSessionIdRef.current = null;
+        localStorage.removeItem(LS_SESSION_ID);
+        localStorage.removeItem(LS_CONV_ID);
+        // Mark the synthesis graph node as completed
+        setNodeCompleted(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
+        // Timer: mark end time
+        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        if (!isReplayedEvent) {
+          addMessageToConv(researchConvIdRef.current!, {
+            id: generateId(),
+            role: 'assistant',
+            type: 'report',
+            content: message || 'Research report complete.',
+            data: {
+              synthesis: {
+                title: data?.title ?? 'Research Report',
+                summary: data?.document ?? message ?? 'No report content available.',
+                key_findings: data?.key_findings,
+                sources: data?.sources,
+                generatedAt: new Date().toISOString(),
+              },
+            },
+            timestamp: new Date(),
+          });
+        }
+        break;
+      }
+
+      case 'research_paused':
+        console.log('Research paused acknowledged:', message);
+        setCurrentStatus('Paused');
+        break;
+
+      case 'research_resumed':
+        console.log('Research resumed acknowledged:', message);
+        setCurrentStatus('Researching');
+        break;
+
+      case 'research_stopped':
+        console.log('Research stopped acknowledged:', message);
+        setIsResearching(false);
+        setCurrentStatus('');
+        activeSessionIdRef.current = null;
+        localStorage.removeItem(LS_SESSION_ID);
+        localStorage.removeItem(LS_CONV_ID);
+        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        resetResearch();
+        resetGraph(researchConvIdRef.current!);
+        break;
+
+      // ── Self-optimization workflow ──────────────────────────────────────
+      case 'optimize_started':
+        console.log('[optimize] Workflow started');
+        setIsOptimizing(true);
+        setCurrentStatus('Self-Optimizing…');
+        setActiveView('graph');
+        break;
+
+      case 'optimize_progress': {
+        if (isReplayedEvent) break;
+        const phase = data?.phase;
+        const phaseStatus = data?.status;
+        console.log('[optimize] Phase:', phase, phaseStatus);
+        if (phase && phaseStatus && optimizeConvIdRef.current) {
+          const nodeStatus = phaseStatus === 'running' ? 'running'
+            : phaseStatus === 'completed' ? 'completed'
+              : 'failed';
+          updateOptimizePhase(optimizeConvIdRef.current, phase, nodeStatus);
+        }
+        setCurrentStatus(message || 'Optimizing…');
+        addMessageToConv(optimizeConvIdRef.current!, {
+          id: generateId(),
+          role: 'assistant',
+          type: 'system',
+          content: message || 'Optimization in progress…',
+          timestamp: new Date(),
+        });
+        break;
+      }
+
+      case 'optimize_complete': {
+        if (isReplayedEvent) break;
+        console.log('[optimize] Complete:', data);
+        setIsOptimizing(false);
+        setCurrentStatus('Optimization Complete');
+        const methodsCount = data?.new_methods_count ?? 0;
+        addMessageToConv(optimizeConvIdRef.current!, {
+          id: generateId(),
+          role: 'assistant',
+          type: 'system',
+          content: `✅ Self-optimization complete. ${methodsCount} new research method(s) integrated into RESEARCH-METHODS.md.`,
+          timestamp: new Date(),
+        });
+        break;
+      }
+
+      default:
+        console.warn('Unknown WebSocket message type:', type);
+        break;
+    }
+
+    // ── Event index tracking ───────────────────────────────────────
+    // Every non-control non-replayed event increments the running
+    // counter so we always know how many events are accounted for
+    // in the persisted conversation state.
+    if (!isControlEvent && !isReplayedEvent) {
+      activeEventIndexRef.current++;
+    }
 
     // ── Post-batch bookkeeping ───────────────────────────────────────
     // If a replay was in progress and all events have been drained,
@@ -686,12 +686,13 @@ const AppContent: React.FC = () => {
     }
 
     // Flush the running event index to conversation metadata every
-    // batch so events seen mid-session are preserved after a browser
-    // close.
+    // event so the persisted index is always up-to-date.
     if (researchConvIdRef.current) {
       setEventIndex(researchConvIdRef.current, activeEventIndexRef.current);
     }
   }, [
+    messageCount,
+    shiftMessage,
     drainMessageQueue,
     addMessageToConv,
     setIsResearching,
@@ -714,7 +715,6 @@ const AppContent: React.FC = () => {
     updateOptimizePhase,
     getEventIndex,
     setEventIndex,
-    drainMessageQueue,
     // researchConvIdRef / optimizeConvIdRef / replayTotalRef /
     // pendingTotalEventsRef / activeEventIndexRef are refs;
     // no need to list them
@@ -780,7 +780,6 @@ const AppContent: React.FC = () => {
 
       sendMessage({ type: 'query', content, conversationId: convId, research_depth: researchDepth });
       setIsResearching(true);
-      setCurrentStatus('Researching');
     } else {
       // Chat mode — route to /chat REST endpoint
       // If research is active, open a fresh thread so research keeps its own conversation
@@ -850,7 +849,6 @@ const AppContent: React.FC = () => {
 
       setPlanStatus('approved');
       setIsResearching(true);
-      setCurrentStatus('Researching');
 
       addMessage({
         id: generateId(),
