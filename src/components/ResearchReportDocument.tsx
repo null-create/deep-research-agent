@@ -122,6 +122,9 @@ export const ResearchReportDocument: React.FC<ResearchReportDocumentProps> = ({
   const segments = parseDocument(synthesis);
   const hasStructure = segments.some((s) => s.type === 'title' || s.type === 'header');
 
+  const contentSegments = segments.filter((s) => s.type !== 'title');
+  const hasBodyContent = contentSegments.some((s) => s.type === 'body');
+
   return (
     <Document>
       <Page size="A4" style={styles.page}>
@@ -137,11 +140,15 @@ export const ResearchReportDocument: React.FC<ResearchReportDocumentProps> = ({
           </Text>
           <View style={styles.divider} />
 
-          {hasStructure ? (
+          {!synthesis || !synthesis.trim() ? (
+            <Text style={styles.body}>
+              Report content is empty. This may indicate a transient model error
+              during generation — please re-run the research.
+            </Text>
+          ) : hasStructure ? (
             // Structured rendering: section headers + body paragraphs + references
-            segments
-              .filter((s) => s.type !== 'title') // title already rendered above
-              .map((seg, i) => {
+            hasBodyContent ? (
+              contentSegments.map((seg, i) => {
                 if (seg.type === 'header') {
                   const isReferences = seg.text === 'REFERENCES';
                   return (
@@ -155,6 +162,12 @@ export const ResearchReportDocument: React.FC<ResearchReportDocumentProps> = ({
                 }
                 return <Text key={i} style={styles.body}>{seg.text}</Text>;
               })
+            ) : (
+              <Text style={styles.body}>
+                The report sections were generated but all content is empty.
+                This may indicate a transient model error — please re-run the research.
+              </Text>
+            )
           ) : (
             // Fallback: render the whole synthesis as a plain text block
             <Text style={styles.body}>{synthesis}</Text>

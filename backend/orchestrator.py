@@ -1934,6 +1934,48 @@ class Orchestrator:
                 "[Orchestrator] Outline parse failed (%s); using defaults", exc
             )
 
+        # If the LLM did not provide a report title (fell back to raw query),
+        # attempt a small model call to generate a proper title.
+        if report_title == query:
+            try:
+                title_response = await self.agents.report.model.generate(
+                    model=report_model,
+                    messages=[
+                        Message(
+                            role="system",
+                            content=(
+                                "You generate concise research report titles. "
+                                "Respond with ONLY the title text, no quotes, no formatting."
+                            ),
+                        ),
+                        Message(
+                            role="user",
+                            content=(
+                                f"Generate a concise title (under 80 characters) "
+                                f"for a research report about: {query}"
+                            ),
+                        ),
+                    ],
+                    temperature=0.3,
+                    max_tokens=40,
+                )
+                if (
+                    title_response.finish_reason != "error"
+                    and title_response.content.strip()
+                ):
+                    report_title = title_response.content.strip()
+            except Exception as _t_exc:
+                logger.debug(
+                    "[Orchestrator] Title generation failed: %s", _t_exc
+                )
+
+            # Heuristic fallback if the LLM call also failed.
+            if report_title == query:
+                _t = query.strip().strip("\"'").strip()
+                report_title = (
+                    _t[0].upper() + _t[1:] if len(_t) > 1 else _t.upper()
+                ) if _t else "Research Report"
+
         if not sections:
             sections = [
                 {"title": "Executive Summary", "description": "Overview of findings"},
@@ -2095,28 +2137,51 @@ class Orchestrator:
             # every drafted section to contain all section headers — duplicating
             # them in the assembled document.  Calling generate() directly with a
             # focused single-section prompt prevents that.
-            draft_response = await self.agents.report.model.generate(
-                model=report_model,
-                messages=[
-                    Message(
-                        role="system",
-                        content=(
-                            "You are a research report section writer. "
-                            "Draft ONLY the specific section requested. "
-                            "Do NOT output any other section headers or a full report structure. "
-                            "Use plain text only — no Markdown syntax. "
-                            "You have access to raw evidence AND curated analytical claims. "
-                            "Synthesize both to produce insights that go beyond simple summarization — "
-                            "identify patterns, draw non-obvious conclusions, and connect findings "
-                            "across sources to derive new understanding."
-                        ),
+            draft_messages = [
+                Message(
+                    role="system",
+                    content=(
+                        "You are a research report section writer. "
+                        "Draft ONLY the specific section requested. "
+                        "Do NOT output any other section headers or a full report structure. "
+                        "Use plain text only — no Markdown syntax. "
+                        "You have access to raw evidence AND curated analytical claims. "
+                        "Synthesize both to produce insights that go beyond simple summarization — "
+                        "identify patterns, draw non-obvious conclusions, and connect findings "
+                        "across sources to derive new understanding."
                     ),
-                    Message(role="user", content="\n\n".join(draft_prompt_parts)),
-                ],
-                temperature=self.config.root_temperature,
-                max_tokens=self.config.root_max_tokens,
-            )
-            drafted_text = draft_response.content.strip()
+                ),
+                Message(role="user", content="\n\n".join(draft_prompt_parts)),
+            ]
+
+            # Retry section drafting once if the model returns empty/error
+            # (e.g. transient rate limiting or server timeout).
+            for _draft_attempt in range(2):
+                draft_response = await self.agents.report.model.generate(
+                    model=report_model,
+                    messages=draft_messages,
+                    temperature=self.config.root_temperature,
+                    max_tokens=self.config.root_max_tokens,
+                )
+                drafted_text = draft_response.content.strip()
+                if drafted_text and draft_response.finish_reason != "error":
+                    break
+                if _draft_attempt == 0:
+                    logger.warning(
+                        "[Synthesis] Section '%s' draft was empty/error; retrying once…",
+                        sec_title,
+                    )
+                    await asyncio.sleep(2.0)
+            else:
+                logger.warning(
+                    "[Synthesis] Section '%s' draft still empty after retry; using placeholder.",
+                    sec_title,
+                )
+                drafted_text = (
+                    f"[Content for the '{sec_title}' section could not be generated "
+                    f"due to a transient model error. Re-run research to regenerate.]"
+                )
+
             drafted_sections.append({"title": sec_title, "content": drafted_text})
 
             # Stream the drafted section to the frontend immediately
