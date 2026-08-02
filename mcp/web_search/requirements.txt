@@ -1,5 +1,5 @@
 # FastMCP and core dependencies
-mcp>=1.26.0
+mcp==1.26.0
 
 # Search backends
 ddgs>=9.0.0
