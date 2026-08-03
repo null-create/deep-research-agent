@@ -9,7 +9,7 @@ neo4j
 fastapi
 httpx
 huggingface_hub
-mcp
+mcp==1.28.1
 ollama
 openai
 pytest
