@@ -13,6 +13,7 @@ mcp
 ollama
 openai
 pytest
+python-dotenv
 pytest-asyncio
 rich
 sentence-transformers
