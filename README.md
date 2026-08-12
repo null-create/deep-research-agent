@@ -172,17 +172,15 @@ There is no separate memory MCP server.
 
 ## AI Coding Assistant
 
-This repo ships with a custom **Agent Developer Assistant** for GitHub Copilot. It is a senior-engineer-level coding agent with deep knowledge of this codebase — architecture, conventions, concurrency model, known bugs, and historical decisions. Use it for implementing features, debugging, refactoring, or answering questions about how the system works.
-
-**To use it:** open GitHub Copilot Chat in VS Code and select the `Agent Developer Assistant` agent.
+This repo ships with a root-level **`AGENTS.md`** developer guide for AI coding assistants. It encodes senior-engineer-level knowledge of this codebase — architecture, conventions, concurrency model, known bugs, and historical decisions — so any capable coding agent can implement features, debug, refactor, or answer questions about how the system works.
 
 At the start of each session the agent automatically:
 
-1. Loads its persistent memory from `.github/agents/Agent-Developer-Assistant/memory/MEMORY.md`
-2. Loads the living architecture map from `.github/agents/Agent-Developer-Assistant/memory/PROJECT-KNOWLEDGE.md`
+1. Loads its persistent memory from `docs/MEMORY.md`
+2. Loads the living architecture map from `docs/PROJECT-KNOWLEDGE.md`
 3. Checks recent `git log` to orient itself on what has changed
 
-Both memory files are updated at the end of sessions when something worth preserving is learned. The agent definition lives at `.github/agents/Agent-Developer-Assistant.md`.
+Both memory files are updated at the end of sessions when something worth preserving is learned.
 
 ## Testing
 

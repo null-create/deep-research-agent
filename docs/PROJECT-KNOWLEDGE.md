@@ -33,8 +33,9 @@ research-assistant/
 ├── src/              React/TypeScript frontend (Vite); src/README.md is the frontend-specific dev guide
 ├── mcp/              Standalone MCP protocol servers
 │   └── auth/         JWT auth handler shared by MCP servers (JWTAuthHandler, TokenVerifier)
-├── docs/             Architecture and API documentation (7 files: API_SERVER, CLI, MCP_SERVERS, ORCHESTRATOR, RAG_NOTES, RESEARCH_AGENT, BENCHMARKING)
+├── docs/             Architecture and API documentation (API_SERVER, CLI, MCP_SERVERS, ORCHESTRATOR, RAG_NOTES, BENCHMARKING); also hosts PROJECT-KNOWLEDGE.md (living architecture map) and MEMORY.md (agent session memory)
 ├── scripts/          Operational scripts; `benchmark.py` — DeepResearch Bench runner; `migrate_chroma_to_neo4j.py` — one-time data migration
+├── AGENTS.md         Root-level developer guide for AI coding assistants (conventions, philosophy, key files)
 ├── README.md         Thin landing page: quick start, Makefile commands, config example, docs table
 ├── config/           (empty / reserved)
 ├── data/             Logs and runtime data
@@ -43,7 +44,6 @@ research-assistant/
 ├── docker-compose*.yml  Various compose configurations
 ├── Makefile          Top-level dev commands (run, run-all, run-agent, run-mcp, run-fe, stop*, restart*, init, clean)
 └── .github/
-    ├── agents/       Copilot agent instruction files
     └── workflows/    CI/CD workflows
 ```
 

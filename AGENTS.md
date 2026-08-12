@@ -1,15 +1,6 @@
----
-name: Agent Developer Assistant
-description: >
-  A specialized coding assistant for the research-assistant repository.
-  Maintains persistent project knowledge, tracks development history via git,
-  and enforces simplicity-first architecture principles for a hierarchical
-  multi-agent deep research system.
----
+# AGENTS.md — Development Guide
 
-# Agent Developer Assistant
-
-You are a senior software engineer embedded in the **research-assistant** project — an AI-powered deep research system built on a hierarchical multi-agent orchestration architecture (Python/FastAPI backend, React/TypeScript frontend). You combine deep familiarity with this specific codebase with strong opinions about simplicity, concurrency safety, and architectural elegance.
+This is a working guide for AI coding assistants in the **research-assistant** project — an AI-powered deep research system built on a hierarchical multi-agent orchestration architecture (Python/FastAPI backend, React/TypeScript frontend). It encodes simplicity-first architecture principles, concurrency safety, and project conventions.
 
 ---
 
@@ -19,25 +10,25 @@ You are a senior software engineer embedded in the **research-assistant** projec
 
 ### 1. Load Persistent Memory
 
-Read `.github/agents/Agent-Developer-Assistant/memory/MEMORY.md` in full before doing anything else. This is your compressed, curated knowledge of the project's history, decisions, and patterns. If the file does not exist yet, create it with an empty structure.
+Read `docs/MEMORY.md` in full before doing anything else. This is the compressed, curated knowledge of the project's history, decisions, and patterns. If the file does not exist yet, create it with an empty structure.
 
 ***CRITICAL***
-***This AND ONLY THIS is your source of truth for project context! This is the only file you need to maintain to preserve project knowledge across sessions.***
+***This AND ONLY THIS is the source of truth for project context! This is the only file that must be maintained to preserve project knowledge across sessions.***
 
 ### 2. Load Project Knowledge Map
 
-Read `.github/agents/Agent-Developer-Assistant/memory/PROJECT-KNOWLEDGE.md` in full. This is your working map of the physical layout, key modules, current state of the codebase, and known technical debt. If the file does not exist yet, create it by exploring the repository structure.
+Read `docs/PROJECT-KNOWLEDGE.md` in full. This is the working map of the physical layout, key modules, current state of the codebase, and known technical debt. If the file does not exist yet, create it by exploring the repository structure.
 
 ***CRITICAL***
-***This is your current mental model of the codebase. It should be accurate and up-to-date at all times. Update it surgically whenever you discover something is outdated or when significant changes land. This is the file you refer to when asked about where things are or how they connect.***
+***This is the current mental model of the codebase. It should be accurate and up-to-date at all times. Update it surgically whenever something is discovered to be outdated or when significant changes land. Refer to it when asked about where things are or how they connect.***
 
 ### 3. Examine Recent Git History
 
-Run `git log --oneline -20` and `git log --stat -5` to orient yourself on what has changed recently. Cross-reference against your MEMORY.md to identify anything new or unexpected. Do not narrate this to the user unless something notable stands out.
+Run `git log --oneline -20` and `git log --stat -5` to orient on what has changed recently. Cross-reference against `docs/MEMORY.md` to identify anything new or unexpected. Do not narrate this to the user unless something notable stands out.
 
 ### 4. Orient and Engage
 
-With memory and git history loaded, you are ready to assist. Briefly acknowledge what you know about the current state of the project if it's relevant to the user's first message, then proceed.
+With memory and git history loaded, briefly acknowledge what you know about the current state of the project if it's relevant to the user's first message, then proceed.
 
 ---
 
@@ -45,18 +36,18 @@ With memory and git history loaded, you are ready to assist. Briefly acknowledge
 
 ### MEMORY.md — Compressed Session Insights
 
-**Location:** `.github/agents/Agent-Developer-Assistant/memory/MEMORY.md`
+**Location:** `docs/MEMORY.md`
 
 **Purpose:** Long-term, compressed notes about the project. Think of it as an engineering journal — decisions made, patterns discovered, problems solved, anti-patterns to avoid, and important context that would be useful to re-load in a future session.
 
-**Format:** Organized by date (YYYY-MM-DD) with concise bullet points. Entries are not appended after every message — only when you learn something worth preserving. Good triggers for writing:
+**Format:** Organized by date (YYYY-MM-DD) with concise bullet points. Entries are not appended after every message — only when something worth preserving is learned. Good triggers for writing:
 
 - A non-obvious architectural decision was made or explained
 - A bug was found and fixed that reveals an underlying constraint
 - A pattern was discovered (good or bad) that recurs across the codebase
 - A significant refactor or new feature landed
 - A performance or concurrency concern was identified or resolved
-- Context that would save future-you meaningful time
+- Context that would save future sessions meaningful time
 
 Keep entries compressed. Prefer facts over narrative. Prefer implications over descriptions.
 
@@ -74,9 +65,9 @@ Keep entries compressed. Prefer facts over narrative. Prefer implications over d
 
 ### PROJECT-KNOWLEDGE.md — Living Architecture Map
 
-**Location:** `.github/agents/Agent-Developer-Assistant/memory/PROJECT-KNOWLEDGE.md`
+**Location:** `docs/PROJECT-KNOWLEDGE.md`
 
-**Purpose:** Your current, accurate map of the codebase — where things live, what they do, how they connect, and what the current development state is. Load fully at the start of each session. Update surgically during a session when you discover something is outdated or when significant changes land.
+**Purpose:** The current, accurate map of the codebase — where things live, what they do, how they connect, and what the current development state is. Load fully at the start of each session. Update surgically during a session when something is discovered to be outdated or when significant changes land.
 
 **Sections to maintain:**
 
@@ -93,7 +84,7 @@ Keep entries compressed. Prefer facts over narrative. Prefer implications over d
 
 ## Coding Philosophy
 
-You hold these principles as non-negotiable constraints that shape every recommendation and implementation you make:
+These principles are non-negotiable constraints that shape every recommendation and implementation:
 
 ### Simplicity First
 
@@ -159,20 +150,20 @@ Good triggers for asking:
 - It's unclear whether an existing abstraction should be extended or a new one created
 - The desired behavior at edge cases or failure modes hasn't been specified
 
-Ask directly and concisely. Batch related questions into a single message rather than asking one at a time. Do not ask about things you can reasonably infer from the codebase or from prior context in `MEMORY.md`.
+Ask directly and concisely. Batch related questions into a single message rather than asking one at a time. Do not ask about things that can be reasonably inferred from the codebase or from prior context in `docs/MEMORY.md`.
 
 ### Before Modifying Code
 
 1. Read the relevant file(s) — do not modify what you haven't read
 2. Understand the existing pattern before deviating from it
-3. Check `MEMORY.md` for notes about that module or subsystem
+3. Check `docs/MEMORY.md` for notes about that module or subsystem
 4. Consider whether the change respects the concurrency model
 
 ### When Suggesting Changes
 
 - Prefer the minimal change that achieves the goal
 - If a refactor is needed, scope it tightly — do not clean up surrounding code that wasn't part of the task
-- If you discover tech debt while working, note it in `PROJECT-KNOWLEDGE.md` rather than fixing it in-scope unless instructed
+- If tech debt is discovered while working, note it in `docs/PROJECT-KNOWLEDGE.md` rather than fixing it in-scope unless instructed
 - If a change alters external behavior (API shape, WebSocket events, CLI interface, MCP tools, config variables), update the relevant file(s) in `docs/` before considering the task complete
 
 ### Code Style
@@ -204,6 +195,8 @@ Ask directly and concisely. Batch related questions into a single message rather
 | `backend/mcp_client.py` | MCP protocol client and `MCPServerRegistry` |
 | `backend/context.py` | `ResearchContext`: intermediate results and cross-step state |
 | `backend/search_result_store.py` | Per-session RAG store with in-process cosine ranking |
+| `backend/long_term_memory.py` | `AsyncLongTermMemory`: persistent cross-session Neo4j store + `KnowledgeGraph` (GraphRAG) |
+| `backend/session_store.py` | Session registry + disk persistence (atomic checkpoint files in `logs/sessions/`) |
 | `backend/config.py` | Pydantic config from environment variables |
 | `backend/models.py` | Shared data models (ResearchPlan, ResearchStep, Message, etc.) |
 | `src/App.tsx` | WebSocket message dispatch, top-level state wiring |
@@ -220,9 +213,9 @@ Ask directly and concisely. Batch related questions into a single message rather
 
 After completing meaningful work in a session:
 
-1. **Update MEMORY.md** if you learned something worth preserving — new architectural insight, a pattern, a resolved ambiguity, a discovered constraint. Keep it compressed.
+1. **Update `docs/MEMORY.md`** if something worth preserving was learned — new architectural insight, a pattern, a resolved ambiguity, a discovered constraint. Keep it compressed.
 
-2. **Update PROJECT-KNOWLEDGE.md** if the codebase changed in a way that makes your previous map inaccurate — new files added, modules refactored, data flows changed.
+2. **Update `docs/PROJECT-KNOWLEDGE.md`** if the codebase changed in a way that makes the previous map inaccurate — new files added, modules refactored, data flows changed.
 
 3. **Update any relevant documentation in `docs/`** if the change affects user-facing or developer-facing behavior. Each file in `docs/` maps to a subsystem — update only the files relevant to what changed. Good triggers: API contract changes, new WebSocket events, new CLI flags, MCP server changes, orchestration behavior changes, new configuration variables. Do not rewrite docs for internal refactors that leave external behavior unchanged.
 
@@ -230,4 +223,4 @@ After completing meaningful work in a session:
 
 5. **Update top level README.md** if the change is significant enough to warrant it — new features, major refactors, architectural changes, or anything that would be important for a new engineer to know when first exploring the repo. This README is generally a high-level overview, so only update it for significant changes that affect the overall understanding of the project. Do not add minor details or internal refactors to the README.
 
-Do not append boilerplate entries. Only write what future-you would actually find useful.
+Do not append boilerplate entries. Only write what future sessions would actually find useful.
