@@ -1965,16 +1965,16 @@ class Orchestrator:
                 ):
                     report_title = title_response.content.strip()
             except Exception as _t_exc:
-                logger.debug(
-                    "[Orchestrator] Title generation failed: %s", _t_exc
-                )
+                logger.debug("[Orchestrator] Title generation failed: %s", _t_exc)
 
             # Heuristic fallback if the LLM call also failed.
             if report_title == query:
                 _t = query.strip().strip("\"'").strip()
                 report_title = (
-                    _t[0].upper() + _t[1:] if len(_t) > 1 else _t.upper()
-                ) if _t else "Research Report"
+                    (_t[0].upper() + _t[1:] if len(_t) > 1 else _t.upper())
+                    if _t
+                    else "Research Report"
+                )
 
         if not sections:
             sections = [

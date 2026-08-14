@@ -1325,4 +1325,3 @@ class TestKnowledgeGraph:
         called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
         assert any("CREATE" in q for q in called_cyphers)
         assert result.get("success") is True
-

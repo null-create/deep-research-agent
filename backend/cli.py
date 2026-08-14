@@ -2226,7 +2226,9 @@ class MCPScreen(Screen):
         servers = self.app.mcp_registry.get_all_server_info()
         info = next((s for s in servers if s["name"] == self._selected_server), None)
         if info and info.get("builtin"):
-            feedback.update(f"'{self._selected_server}' is a built-in server and cannot be removed.")
+            feedback.update(
+                f"'{self._selected_server}' is a built-in server and cannot be removed."
+            )
             return
         target = self._selected_server
         await self.app.mcp_registry.unregister(target)
@@ -2400,7 +2402,9 @@ class SessionsScreen(Screen):
             created = data.get("created_at", "?")[:19]
             replay_count = len(data.get("replay_log", []))
             detail_log.write(Text(f"Session ID: {sid}", style="bold"))
-            detail_log.write(Text(f"State:      {state}  |  Created: {created}", style="dim"))
+            detail_log.write(
+                Text(f"State:      {state}  |  Created: {created}", style="dim")
+            )
             detail_log.write(Text(f"Events:     {replay_count}", style="dim"))
             if goal:
                 detail_log.write(Text(f"Goal:       {goal}", style="green"))
