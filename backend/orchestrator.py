@@ -939,6 +939,165 @@ class Orchestrator:
             plan=plan.to_dict(),
         )
 
+    async def modify_plan(self, plan_id: str, feedback: str) -> ResponseMessage:
+        """
+        Regenerate the pending plan incorporating user feedback.
+
+        Mirrors ``ResearchAgent.modify_plan`` so the v2 WebSocket handler can
+        use the same message-type contract as v1.
+
+        Parameters
+        ----------
+        plan_id:
+            The ``id`` of the plan the user wants to modify (must match the
+            current ``_pending_plan``).
+        feedback:
+            Free-text feedback from the user describing the desired changes.
+
+        Returns
+        -------
+        ResponseMessage
+            ``type="plan"`` on success, ``type="error"`` otherwise.
+        """
+        if not self._pending_plan:
+            return ResponseMessage(
+                type="error",
+                message="No pending plan to modify. Please submit a query first.",
+            )
+
+        if self._pending_plan.id != plan_id:
+            return ResponseMessage(
+                type="error",
+                message=f"No pending plan found with id '{plan_id}'.",
+            )
+
+        original_plan = self._pending_plan
+        query = self.context.get_step_result("query") or ""
+
+        try:
+            # Ask the root backend to regenerate the plan with feedback injected
+            plan_prompt = (
+                self._build_planning_prompt(query)
+                + f"\n\nUser feedback on the previous plan:\n{feedback}"
+                + f"\n\nPrevious plan for reference:\n{json.dumps(original_plan.to_dict(), indent=2)}"
+            )
+            root_model = self._select_model(AgentRole.ROOT, "plan")
+            root_messages = [
+                Message(role="system", content=self._root_system_prompt()),
+                Message(role="user", content=plan_prompt),
+            ]
+            response = await self._root_backend.generate(
+                model=root_model,
+                messages=root_messages,
+                temperature=self.config.root_temperature,
+                max_tokens=self.config.root_max_tokens,
+            )
+            modified_plan = self._parse_plan(
+                response.content, query=self.context.get_step_result("query") or ""
+            )
+            self._pending_plan = modified_plan
+            self.context.save_step("plan", json.dumps(modified_plan.to_dict()))
+
+            # Generate a brief human-readable summary of what changed
+            summary_messages = [
+                Message(
+                    role="system",
+                    content=(
+                        "You are a research planning assistant. "
+                        "Briefly explain the changes made to a research plan based on user feedback. "
+                        "Be concise — two or three sentences at most."
+                    ),
+                ),
+                Message(
+                    role="user",
+                    content=(
+                        f"Original plan:\n{json.dumps(original_plan.to_dict(), indent=2)}\n\n"
+                        f"Updated plan:\n{json.dumps(modified_plan.to_dict(), indent=2)}\n\n"
+                        f"User feedback: {feedback}"
+                    ),
+                ),
+            ]
+            summary_model = self._select_model(AgentRole.ROOT, "update message")
+            summary_response = await self._root_backend.generate(
+                model=summary_model,
+                messages=summary_messages,
+                temperature=self.config.root_temperature,
+                max_tokens=self.config.root_max_tokens,
+            )
+
+            return ResponseMessage(
+                type="plan",
+                message=summary_response.content,
+                plan=modified_plan.to_dict(),
+            )
+
+        except Exception as exc:
+            logger.exception("Orchestrator.modify_plan failed: %s", exc)
+            return ResponseMessage(
+                type="error",
+                message=f"Failed to modify the plan: {exc}",
+                error=str(exc),
+            )
+
+    async def deny_plan(self, plan_id: str) -> ResponseMessage:
+        """
+        Reject the current pending plan and clear orchestrator state.
+
+        Mirrors ``ResearchAgent.deny_plan``.
+
+        Parameters
+        ----------
+        plan_id:
+            Must match the id of the current ``_pending_plan``.
+
+        Returns
+        -------
+        ResponseMessage
+            ``type="plan_denied"`` with a helpful follow-up message.
+        """
+        if not self._pending_plan or self._pending_plan.id != plan_id:
+            return ResponseMessage(
+                type="error",
+                message="No pending plan found with the given id. Cannot deny.",
+            )
+
+        original_query = self.context.get_step_result("query") or ""
+        previous_plan = self._pending_plan
+        self._reset_state()
+
+        try:
+            messages = [
+                Message(
+                    role="system",
+                    content="You are a research planning assistant.",
+                ),
+                Message(
+                    role="user",
+                    content=(
+                        "The research plan below was rejected by the user. "
+                        "Provide a brief acknowledgement and suggest how they might "
+                        "refine their query or approach.\n\n"
+                        f"Original query: {original_query}\n\n"
+                        f"Rejected plan:\n{json.dumps(previous_plan.to_dict(), indent=2)}"
+                    ),
+                ),
+            ]
+            model = self._select_model(AgentRole.ROOT, "plan denial message")
+            response = await self._root_backend.generate(
+                model=model,
+                messages=messages,
+                temperature=self.config.root_temperature,
+                max_tokens=self.config.root_max_tokens,
+            )
+            return ResponseMessage(type="plan_denied", message=response.content)
+
+        except Exception as exc:
+            logger.exception("Orchestrator.deny_plan failed: %s", exc)
+            return ResponseMessage(
+                type="plan_denied",
+                message="Plan denied. You may submit a new query at any time.",
+            )
+
     async def execute(self) -> AsyncIterator[ResponseMessage]:
         """
         Phase 2: dispatch sub-agents to execute the approved plan.
@@ -2469,165 +2628,6 @@ class Orchestrator:
             yield msg
         async for msg in self.synthesize():
             yield msg
-
-    async def modify_plan(self, plan_id: str, feedback: str) -> ResponseMessage:
-        """
-        Regenerate the pending plan incorporating user feedback.
-
-        Mirrors ``ResearchAgent.modify_plan`` so the v2 WebSocket handler can
-        use the same message-type contract as v1.
-
-        Parameters
-        ----------
-        plan_id:
-            The ``id`` of the plan the user wants to modify (must match the
-            current ``_pending_plan``).
-        feedback:
-            Free-text feedback from the user describing the desired changes.
-
-        Returns
-        -------
-        ResponseMessage
-            ``type="plan"`` on success, ``type="error"`` otherwise.
-        """
-        if not self._pending_plan:
-            return ResponseMessage(
-                type="error",
-                message="No pending plan to modify. Please submit a query first.",
-            )
-
-        if self._pending_plan.id != plan_id:
-            return ResponseMessage(
-                type="error",
-                message=f"No pending plan found with id '{plan_id}'.",
-            )
-
-        original_plan = self._pending_plan
-        query = self.context.get_step_result("query") or ""
-
-        try:
-            # Ask the root backend to regenerate the plan with feedback injected
-            plan_prompt = (
-                self._build_planning_prompt(query)
-                + f"\n\nUser feedback on the previous plan:\n{feedback}"
-                + f"\n\nPrevious plan for reference:\n{json.dumps(original_plan.to_dict(), indent=2)}"
-            )
-            root_model = self._select_model(AgentRole.ROOT, "plan")
-            root_messages = [
-                Message(role="system", content=self._root_system_prompt()),
-                Message(role="user", content=plan_prompt),
-            ]
-            response = await self._root_backend.generate(
-                model=root_model,
-                messages=root_messages,
-                temperature=self.config.root_temperature,
-                max_tokens=self.config.root_max_tokens,
-            )
-            modified_plan = self._parse_plan(
-                response.content, query=self.context.get_step_result("query") or ""
-            )
-            self._pending_plan = modified_plan
-            self.context.save_step("plan", json.dumps(modified_plan.to_dict()))
-
-            # Generate a brief human-readable summary of what changed
-            summary_messages = [
-                Message(
-                    role="system",
-                    content=(
-                        "You are a research planning assistant. "
-                        "Briefly explain the changes made to a research plan based on user feedback. "
-                        "Be concise — two or three sentences at most."
-                    ),
-                ),
-                Message(
-                    role="user",
-                    content=(
-                        f"Original plan:\n{json.dumps(original_plan.to_dict(), indent=2)}\n\n"
-                        f"Updated plan:\n{json.dumps(modified_plan.to_dict(), indent=2)}\n\n"
-                        f"User feedback: {feedback}"
-                    ),
-                ),
-            ]
-            summary_model = self._select_model(AgentRole.ROOT, "update message")
-            summary_response = await self._root_backend.generate(
-                model=summary_model,
-                messages=summary_messages,
-                temperature=self.config.root_temperature,
-                max_tokens=self.config.root_max_tokens,
-            )
-
-            return ResponseMessage(
-                type="plan",
-                message=summary_response.content,
-                plan=modified_plan.to_dict(),
-            )
-
-        except Exception as exc:
-            logger.exception("Orchestrator.modify_plan failed: %s", exc)
-            return ResponseMessage(
-                type="error",
-                message=f"Failed to modify the plan: {exc}",
-                error=str(exc),
-            )
-
-    async def deny_plan(self, plan_id: str) -> ResponseMessage:
-        """
-        Reject the current pending plan and clear orchestrator state.
-
-        Mirrors ``ResearchAgent.deny_plan``.
-
-        Parameters
-        ----------
-        plan_id:
-            Must match the id of the current ``_pending_plan``.
-
-        Returns
-        -------
-        ResponseMessage
-            ``type="plan_denied"`` with a helpful follow-up message.
-        """
-        if not self._pending_plan or self._pending_plan.id != plan_id:
-            return ResponseMessage(
-                type="error",
-                message="No pending plan found with the given id. Cannot deny.",
-            )
-
-        original_query = self.context.get_step_result("query") or ""
-        previous_plan = self._pending_plan
-        self._reset_state()
-
-        try:
-            messages = [
-                Message(
-                    role="system",
-                    content="You are a research planning assistant.",
-                ),
-                Message(
-                    role="user",
-                    content=(
-                        "The research plan below was rejected by the user. "
-                        "Provide a brief acknowledgement and suggest how they might "
-                        "refine their query or approach.\n\n"
-                        f"Original query: {original_query}\n\n"
-                        f"Rejected plan:\n{json.dumps(previous_plan.to_dict(), indent=2)}"
-                    ),
-                ),
-            ]
-            model = self._select_model(AgentRole.ROOT, "plan denial message")
-            response = await self._root_backend.generate(
-                model=model,
-                messages=messages,
-                temperature=self.config.root_temperature,
-                max_tokens=self.config.root_max_tokens,
-            )
-            return ResponseMessage(type="plan_denied", message=response.content)
-
-        except Exception as exc:
-            logger.exception("Orchestrator.deny_plan failed: %s", exc)
-            return ResponseMessage(
-                type="plan_denied",
-                message="Plan denied. You may submit a new query at any time.",
-            )
 
     def get_contradictions(self) -> List[Contradiction]:
         """Return all contradictions flagged during the last run."""
