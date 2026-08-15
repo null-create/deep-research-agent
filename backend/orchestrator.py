@@ -829,6 +829,21 @@ class Orchestrator:
     # minimal changes.
     # ------------------------------------------------------------------
 
+    async def run(self, query: str) -> AsyncIterator[ResponseMessage]:
+        """
+        Convenience method: run the full pipeline in one call.
+
+        plan() → execute() → synthesize()
+
+        Yields all ``ResponseMessage`` events from every phase.
+        """
+        async for msg in self.plan(query):
+            yield msg
+        async for msg in self.execute():
+            yield msg
+        async for msg in self.synthesize():
+            yield msg
+
     async def plan(
         self,
         query: str,
@@ -2613,21 +2628,6 @@ class Orchestrator:
                     )
             except Exception as exc:
                 logger.debug("[Orchestrator] Confidence decay skipped: %s", exc)
-
-    async def run(self, query: str) -> AsyncIterator[ResponseMessage]:
-        """
-        Convenience method: run the full pipeline in one call.
-
-        plan() → execute() → synthesize()
-
-        Yields all ``ResponseMessage`` events from every phase.
-        """
-        async for msg in self.plan(query):
-            yield msg
-        async for msg in self.execute():
-            yield msg
-        async for msg in self.synthesize():
-            yield msg
 
     def get_contradictions(self) -> List[Contradiction]:
         """Return all contradictions flagged during the last run."""
