@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { BookOpen } from 'lucide-react';
 import { SynthesisData } from '../types/conversation';
-import { ReportViewer } from './ReportViewer';
 import { ResearchReportViewer } from './ResearchReportViewer';
 
 interface SynthesisMessageProps {
@@ -9,7 +8,7 @@ interface SynthesisMessageProps {
 }
 
 export const SynthesisMessage: React.FC<SynthesisMessageProps> = ({ synthesis }) => {
-  const [showReport, setShowReport] = useState(false);
+  const hasContent = synthesis.summary && synthesis.summary.trim().length > 0;
 
   return (
     <>
@@ -30,22 +29,22 @@ export const SynthesisMessage: React.FC<SynthesisMessageProps> = ({ synthesis })
           Your research report <strong>"{synthesis.title ?? 'Research Report'}"</strong> is ready.
         </p>
 
+        {!hasContent && (
+          <p className="text-sm text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3 border border-amber-200 dark:border-amber-700">
+            The report content appears to be empty. This may indicate a transient
+            model error during generation — you may want to re-run the research.
+          </p>
+        )}
+
         {/* ── View Report button ── */}
         <div className="flex justify-end">
           <ResearchReportViewer
             title={synthesis.title ?? 'Research Report'}
             synthesis={synthesis.summary}
+            generatedAt={synthesis.generatedAt}
           />
         </div>
       </div>
-
-      {/* ── ReportViewer already imported, render it conditionally ── */}
-      {showReport && (
-        <ReportViewer
-          synthesis={synthesis}
-          onClose={() => setShowReport(false)}
-        />
-      )}
     </>
   );
 };

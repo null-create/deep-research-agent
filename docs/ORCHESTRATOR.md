@@ -677,7 +677,7 @@ Client                                         Server (/ws/research)
 | **Backend sharing** | Single backend | Per-role backends via `AgentPool` |
 | **State reset** | `_clear_state()` | `_reset_state()` |
 
-The `/ws/research` endpoint is exclusively Orchestrator-powered. `ResearchAgent` and `AdvancedResearchAgent` are used only by the REST `/chat` endpoint and the CLI; they are not exposed over WebSocket.
+The `/ws/research` endpoint is exclusively Orchestrator-powered. The legacy `ResearchAgent` is used only by the REST `/chat` endpoint and the CLI chat mode; it is not exposed over WebSocket.
 
 ---
 

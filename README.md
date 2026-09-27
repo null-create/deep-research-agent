@@ -20,7 +20,7 @@ An AI-powered deep research system built on a hierarchical multi-agent architect
 - In-process RAG: `SearchResultStore` with sentence-transformer embeddings (cosine ranking) scoped per session
 - In-process long-term memory: `AsyncLongTermMemory` persists cross-session findings to Neo4j (graph database). Two layers: flat vector store (Neo4j vector indexes) for raw evidence + `KnowledgeGraph` (GraphRAG) layer for typed entities, directed triples with confidence scores, and LLM-generated community clusters. Relationships are deduplicated and include temporal tracking (`last_confirmed`, `confirmation_count`). Supports hierarchy (`IS_A`), contradiction (`CONTRADICTS`), and provenance (`SOURCED_FROM → Source`) edges. Graph context is recalled during planning; communities are updated post-synthesis only when enough new facts have landed (`GRAPH_COMMUNITY_MIN_MUTATIONS`); confidence is decayed over time (`CONFIDENCE_DECAY_HALF_LIFE`). A `prune()` method archives stale low-confidence relationships and orphaned entities.
 - Self-optimization mode: agent reads session logs and the knowledge graph, then updates its own research playbook (`backend/instructions/RESEARCH-METHODS.md`)
-- MCP servers: UA rotation, per-domain rate limiting (2s), concurrency cap (3), 429 retry, 50KB output cap
+- MCP servers: UA rotation, per-domain rate limiting (2s), concurrency cap (3), 429 retry, 100KB scrape output cap
 
 ## Quick Start
 
@@ -44,7 +44,7 @@ make bench        # Run benchmark script
 | `make restart` | Stop + restart backend + MCP servers |
 | `make restart-all` | Stop + restart everything |
 | `make init` | Install backend venv and frontend node_modules |
-| `make clean` | Remove `.venv` and `node_modules` |
+| `make clean` | Remove backend `venv` and frontend `node_modules` / `dist` |
 
 **Local development (without Docker):**
 
@@ -68,31 +68,45 @@ Create `backend/.env`:
 AGENT_MODE=research                  # research | chat | self-optimization
 
 # ── Model backend ─────────────────────────────────────────────
-MODEL_BACKEND=ollama                 # openai | ollama | bedrock | azure | gcp | huggingface
+MODEL_BACKEND=ollama                 # openai | azure | aws | bedrock | gcp | ollama | huggingface | anthropic
+
+# The research pipeline selects a "heavy" model for planning/synthesis and a
+# "light" model for search/analyst work. Each backend has its own pair of
+# *_HEAVY_MODEL / *_LIGHT_MODEL vars. A legacy single *_MODEL field also exists
+# and is used by the /chat endpoint and CLI chat mode.
 
 # Ollama
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=nemotron-3-nano
+OLLAMA_HEAVY_MODEL=nemotron-3-nano
+OLLAMA_LIGHT_MODEL=nemotron-3-nano
 
 # OpenAI (or any OpenAI-compatible endpoint)
 # OPENAI_API_KEY=sk-...
-# OPENAI_MODEL=gpt-4o
+# OPENAI_HEAVY_MODEL=gpt-5.2
+# OPENAI_LIGHT_MODEL=gpt-5-nano
 # OPENAI_BASE_URL=https://api.openai.com/v1
 
-# AWS Bedrock (uses default boto3 credential chain if AWS_API_KEY is unset)
-# AWS_MODEL=global.anthropic.claude-sonnet-4-5-20250929-v1:0
+# AWS Bedrock — two backends:
+#   MODEL_BACKEND=aws     → OpenAI-compatible gateway (needs AWS_BASE_URL + AWS_API_KEY)
+#   MODEL_BACKEND=bedrock → native boto3 (needs AWS_REGION; default credential chain)
+# AWS_HEAVY_MODEL=global.anthropic.claude-sonnet-4-6
+# AWS_LIGHT_MODEL=global.anthropic.claude-haiku-4-5-20251001-v1:0
 # AWS_API_KEY=...
 # AWS_BASE_URL=...
+# AWS_REGION=us-east-1
 
 # Azure OpenAI
 # AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
 # AZURE_OPENAI_API_KEY=...
 # AZURE_OPENAI_DEPLOYMENT=your-deployment-name
+# AZURE_HEAVY_MODEL=gpt-5.2
+# AZURE_LIGHT_MODEL=gpt-5-nano
 # AZURE_API_VERSION=2024-02-15-preview
 
 # GCP Vertex AI
 # GCP_ENDPOINT=https://us-central1-aiplatform.googleapis.com/v1
-# GCP_MODEL=gemini-2.5-pro
+# GCP_HEAVY_MODEL=gemini-2.5-pro
+# GCP_LIGHT_MODEL=gemini-2.5-flash
 # GCP_API_KEY=...
 
 # HuggingFace (local TGI endpoint)
@@ -152,23 +166,21 @@ See [docs/API_SERVER.md](docs/API_SERVER.md) for the full environment variable r
 Long-term memory is handled in-process by `backend/long_term_memory.py`, backed by Neo4j. It has two layers:
 
 - **Flat store** (`:Memory` nodes with vector index): raw evidence and claims, recalled via cosine similarity over Neo4j vector indexes.
-- **Knowledge graph**: typed nodes (`:Entity`, `:Community`, `:Source`) and edges (`:RELATES_TO`, `:IS_A`, `:CONTRADICTS`, `:SOURCED_FROM`, `:MEMBER_OF`). Features: relationship deduplication with merge-on-conflict, temporal tracking, hierarchy traversal, contradiction detection, URL-level provenance, cross-session path finding, confidence decay, and graph pruning. Nine REST endpoints under `/graph/` expose the graph for external inspection and maintenance.
+- **Knowledge graph**: typed nodes (`:Entity`, `:Community`, `:Source`) and edges (`:RELATES_TO`, `:IS_A`, `:CONTRADICTS`, `:SOURCED_FROM`, `:MEMBER_OF`). Features: relationship deduplication with merge-on-conflict, temporal tracking, hierarchy traversal, contradiction detection, URL-level provenance, cross-session path finding, confidence decay, and graph pruning. Twelve REST endpoints under `/graph/` expose the graph for external inspection and maintenance.
 
 There is no separate memory MCP server.
 
 ## AI Coding Assistant
 
-This repo ships with a custom **Agent Developer Assistant** for GitHub Copilot. It is a senior-engineer-level coding agent with deep knowledge of this codebase — architecture, conventions, concurrency model, known bugs, and historical decisions. Use it for implementing features, debugging, refactoring, or answering questions about how the system works.
-
-**To use it:** open GitHub Copilot Chat in VS Code and select the `Agent Developer Assistant` agent.
+This repo ships with a root-level **`AGENTS.md`** developer guide for AI coding assistants. It encodes senior-engineer-level knowledge of this codebase — architecture, conventions, concurrency model, known bugs, and historical decisions — so any capable coding agent can implement features, debug, refactor, or answer questions about how the system works.
 
 At the start of each session the agent automatically:
 
-1. Loads its persistent memory from `.github/agents/Agent-Developer-Assistant/memory/MEMORY.md`
-2. Loads the living architecture map from `.github/agents/Agent-Developer-Assistant/memory/PROJECT-KNOWLEDGE.md`
+1. Loads its persistent memory from `docs/MEMORY.md`
+2. Loads the living architecture map from `docs/PROJECT-KNOWLEDGE.md`
 3. Checks recent `git log` to orient itself on what has changed
 
-Both memory files are updated at the end of sessions when something worth preserving is learned. The agent definition lives at `.github/agents/Agent-Developer-Assistant.md`.
+Both memory files are updated at the end of sessions when something worth preserving is learned.
 
 ## Testing
 

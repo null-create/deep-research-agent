@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Message } from '../types/conversation';
@@ -11,13 +11,25 @@ import { useTypingEffect } from '../hooks/useTypingEffect';
 // Isolated component so the hook is always called unconditionally
 const TypingText: React.FC<{ text: string; messageId: string }> = ({ text, messageId }) => {
   const storageKey = `typed:${messageId}`;
-  const alreadyTyped = !!localStorage.getItem(storageKey);
+  // Use lazy state initializer to read localStorage once (avoids impure render
+  // and throws in environments where localStorage is unavailable).
+  const [alreadyTyped] = useState<boolean>(() => {
+    try {
+      return !!localStorage.getItem(storageKey);
+    } catch {
+      return false;
+    }
+  });
   const displayed = useTypingEffect(text, alreadyTyped);
 
   // Mark this message as fully typed once we've caught up to the full text
   useEffect(() => {
     if (displayed.length > 0 && displayed === text) {
-      localStorage.setItem(storageKey, '1');
+      try {
+        localStorage.setItem(storageKey, '1');
+      } catch {
+        // localStorage unavailable (private mode / quota exceeded) — ignore
+      }
     }
   }, [displayed, text, storageKey]);
 
@@ -170,7 +182,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
     // ── Chat response (streaming from /chat endpoint) ─────────────────────────
     if (message.type === 'chat_response') {
-      return <TypingText text={message.content} messageId={message.id} />;
+      return <TypingText text={message.content ?? ''} messageId={message.id} />;
     }
 
     // ── Default plain text ───────────────────────────────────────────────────

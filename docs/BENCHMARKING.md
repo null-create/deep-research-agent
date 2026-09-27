@@ -53,8 +53,8 @@ Each completed task is written to the output file immediately. If the run is int
 |------|---------|-------------|
 | `--ws-url` | `ws://localhost:9999/ws/research` | Backend WebSocket URL |
 | `--research-depth` | `shallow` | `shallow` / `moderate` / `deep` |
-| `--concurrency` | `3` | Concurrent tasks (hard ceiling: `MAX_CONCURRENT_PIPELINES=5`) |
-| `--task-timeout` | `1800` | Per-task timeout in seconds |
+| `--concurrency` | `10` | Concurrent tasks (the backend caps simultaneous pipelines via `MAX_CONCURRENT_SESSIONS`, default `10`) |
+| `--task-timeout` | `43200` | Per-task timeout in seconds (default: 12 hours) |
 | `--lang` | `both` | `en`, `zh`, or `both` |
 | `--limit N` | off | Run only the first N tasks (useful for smoke testing) |
 | `--resume` / `--no-resume` | resume on | Skip tasks already in the output file |
@@ -124,6 +124,6 @@ The script connects a fresh WebSocket per task and follows the standard session 
 2. Receive `session_created` → receive `plan` → send `{"type": "approve_plan", "planId": "<id>"}`
 3. Wait for `{"type": "report", "data": {"document": "..."}}`
 
-All intermediate events (`status`, `step_start`, `step_complete`, `research_complete`, `section_draft`) are silently consumed. Errors, timeouts, and early `plan_denied` / `research_stopped` events are captured and written as failure records.
+All intermediate events (`status`, `step_start`, `step_complete`, `research_complete`, `synthesis_progress`, `section_draft`) are silently consumed. Errors, timeouts, and early `plan_denied` events are captured and written as failure records.
 
-Concurrency is managed with `asyncio.Semaphore(--concurrency)`. The backend enforces its own `MAX_CONCURRENT_PIPELINES=5` limit independently.
+Concurrency is managed with `asyncio.Semaphore(--concurrency)`. The backend enforces its own `MAX_CONCURRENT_SESSIONS` limit (default `10`, `0` = unlimited) independently.

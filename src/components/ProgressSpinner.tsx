@@ -47,7 +47,7 @@ const STATUS_CONFIG: Record<string, { icon: string; color: string }> = {
   },
   'Verifying Sources': {
     icon: '🕵🏽',
-    color: 'text-grey-500',
+    color: 'text-gray-500',
   },
   'Generating Report': {
     icon: '📝',
@@ -68,9 +68,14 @@ export const ProgressSpinner: React.FC<ProgressSpinnerProps> = ({ status }) => {
   const config = STATUS_CONFIG[status] || STATUS_CONFIG['Researching'];
 
   return (
-    <div className="flex items-center gap-3 p-4 mx-4 my-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={status}
+      className="flex items-center gap-3 p-4 mx-4 my-2 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700"
+    >
       {/* Animated spinner ring */}
-      <div className="relative">
+      <div className="relative" aria-hidden="true">
         <div className={`w-10 h-10 rounded-full border-4 border-gray-200 dark:border-gray-600 border-t-blue-500 animate-spin`} />
         <span className="absolute inset-0 flex items-center justify-center text-lg">
           {config.icon}

@@ -18,7 +18,7 @@ import {
   Cpu,
 } from 'lucide-react';
 import { FileUploader } from './FileUploader';
-import { MCPServerManager } from './MCPServerManger';
+import { MCPServerManager } from './MCPServerManager';
 import { ModelSettings } from './ModelSettings';
 import { Conversation } from '../types/conversation';
 import { useTheme } from '../hooks/useTheme';
@@ -36,6 +36,8 @@ interface SidebarProps {
   researchDepth: ResearchDepth;
   onResearchDepthChange: (depth: ResearchDepth) => void;
   isResearching: boolean;
+  /** Called when the user closes the sidebar on mobile (via backdrop or close button). */
+  onMobileClose?: () => void;
 }
 
 type SidebarTab = 'conversations' | 'files' | 'servers' | 'settings';
@@ -50,9 +52,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   researchDepth,
   onResearchDepthChange,
   isResearching,
+  onMobileClose,
 }) => {
   const [activeTab, setActiveTab] = useState<SidebarTab>('conversations');
   const [isCollapsed, setIsCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   const [width, setWidth] = useState(288); // default w-72 equivalent
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -87,11 +91,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
     document.body.style.userSelect = 'none';
   }, [width]);
 
-  // Auto-collapse sidebar on window resize crossing mobile breakpoint
+  // Only react when the mobile/desktop breakpoint is crossed, not on every
+  // resize pixel — prevents overriding the user's manual collapse/expand.
   useEffect(() => {
+    let wasMobile = window.innerWidth < 768;
     const handleResize = () => {
-      const isMobile = window.innerWidth < 768;
-      setIsCollapsed(isMobile);
+      const nowMobile = window.innerWidth < 768;
+      if (nowMobile !== wasMobile) {
+        wasMobile = nowMobile;
+        setIsMobile(nowMobile);
+        setIsCollapsed(nowMobile);
+      }
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
@@ -147,7 +157,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent, id: string) => {
-    if (e.key === 'Enter') handleSaveRename(id);
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // Blur will fire after this; prevent the double-save by clearing
+      // editingId first so the onBlur handler no-ops.
+      setEditingId(null);
+      if (editTitle.trim()) {
+        onRenameConversation(id, editTitle.trim());
+      }
+      setEditTitle('');
+    }
     if (e.key === 'Escape') {
       setEditingId(null);
       setEditTitle('');
@@ -169,8 +188,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  // Collapsed sidebar view
-  if (isCollapsed) {
+  // Collapsed sidebar view (desktop rail — not shown on mobile)
+  if (isCollapsed && !isMobile) {
     return (
       <div className="w-16 bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700
                       flex flex-col items-center py-4 gap-4">
@@ -233,30 +252,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
     );
   }
 
-  // Expanded sidebar view
-  return (
+  // Expanded sidebar panel (shared by desktop inline and mobile overlay)
+  const sidebarPanel = (
     <div
-      style={{ width }}
-      className="relative bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700
-                 flex flex-col h-full flex-shrink-0"
+      style={isMobile ? undefined : { width }}
+      className={`relative bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700
+                 flex flex-col h-full flex-shrink-0 ${isMobile ? 'w-80 max-w-[85vw]' : ''}`}
     >
-      {/* Drag-to-resize handle on the right edge */}
-      <div
-        onMouseDown={onMouseDown}
-        className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize z-10
-                   hover:bg-blue-400 dark:hover:bg-emerald-500 transition-colors opacity-0 hover:opacity-60
-                   active:opacity-100"
-        title="Drag to resize"
-      />
+      {/* Drag-to-resize handle on the right edge — desktop only */}
+      {!isMobile && (
+        <div
+          onMouseDown={onMouseDown}
+          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize z-10
+                     hover:bg-blue-400 dark:hover:bg-emerald-500 transition-colors opacity-0 hover:opacity-60
+                     active:opacity-100"
+          title="Drag to resize"
+          role="separator"
+          aria-orientation="vertical"
+        />
+      )}
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">
           Research Resources
         </h2>
         <button
-          onClick={() => setIsCollapsed(true)}
+          onClick={() => isMobile ? onMobileClose?.() : setIsCollapsed(true)}
           className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
           title="Collapse sidebar"
+          aria-label="Close sidebar"
         >
           <ChevronLeft className="w-4 h-4 text-gray-600 dark:text-gray-300" />
         </button>
@@ -604,4 +628,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
     </div>
   );
+
+  // On mobile: render as a fixed overlay drawer with a backdrop
+  if (isMobile) {
+    return (
+      <>
+        {/* Backdrop */}
+        <div
+          className="fixed inset-0 z-30 bg-black/40 backdrop-blur-sm"
+          onClick={onMobileClose}
+          aria-hidden="true"
+        />
+        {/* Drawer */}
+        <div className="fixed inset-y-0 left-0 z-40 h-full shadow-2xl">
+          {sidebarPanel}
+        </div>
+      </>
+    );
+  }
+
+  return sidebarPanel;
 };

@@ -8,6 +8,8 @@ interface ServerFile {
 }
 
 interface LocalFile {
+  /** Stable unique key for React rendering. */
+  id: string;
   name: string;
   size: number;
   uploading?: boolean;
@@ -26,7 +28,7 @@ export const FileUploader: React.FC = () => {
     setLoadError(null);
     try {
       const data: ServerFile[] = await apiClient.listFiles();
-      setServerFiles(data.map(f => ({ name: f.name, size: f.size_bytes })));
+      setServerFiles(data.map((f) => ({ id: f.name, name: f.name, size: f.size_bytes })));
     } catch {
       setLoadError('Could not load files from the file handler server.');
     } finally {
@@ -66,23 +68,26 @@ export const FileUploader: React.FC = () => {
   const uploadFiles = async (newFiles: File[]) => {
     if (newFiles.length === 0) return;
 
-    // Optimistically add uploading placeholders
-    const placeholders: LocalFile[] = newFiles.map(f => ({
+    // Optimistically add uploading placeholders with a stable unique id.
+    const placeholders: LocalFile[] = newFiles.map((f) => ({
+      id: `upload-${Date.now()}-${Math.random().toString(36).slice(2)}-${f.name}`,
       name: f.name,
       size: f.size,
       uploading: true,
     }));
     setServerFiles(prev => [...prev, ...placeholders]);
 
-    for (const file of newFiles) {
+    for (let i = 0; i < newFiles.length; i++) {
+      const file = newFiles[i];
+      const placeholder = placeholders[i];
       try {
         await apiClient.uploadFile(file);
         setServerFiles(prev =>
-          prev.map(f => f.name === file.name && f.uploading ? { name: f.name, size: f.size } : f)
+          prev.map(f => f.id === placeholder.id ? { id: f.name, name: f.name, size: f.size } : f)
         );
       } catch {
         setServerFiles(prev =>
-          prev.map(f => f.name === file.name && f.uploading ? { ...f, uploading: false, error: true } : f)
+          prev.map(f => f.id === placeholder.id ? { ...f, uploading: false, error: true } : f)
         );
       }
     }
@@ -181,7 +186,7 @@ export const FileUploader: React.FC = () => {
         <div className="space-y-1.5">
           {serverFiles.map((file) => (
             <div
-              key={file.name}
+              key={file.id}
               className="flex items-center gap-2 p-2.5 bg-white dark:bg-gray-800
                          rounded-lg border border-gray-200 dark:border-gray-700"
             >

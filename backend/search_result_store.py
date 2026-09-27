@@ -385,14 +385,18 @@ class SearchResultStore:
         self,
         query: str,
         top_k: int = 20,
+        step_id_filter: Optional[int] = None,
     ) -> int:
         """
         Persist the top-k semantically-ranked chunks from this session into
         the in-process ``AsyncLongTermMemory`` store.
 
-        Called at the end of ``Orchestrator.synthesize()`` so that raw evidence
-        that did not rise to the level of a named "claim" is still retained for
-        future sessions.
+        Called incrementally after each research step (scoped via
+        ``step_id_filter``) and once more at the end of
+        ``Orchestrator.synthesize()`` so that raw evidence that did not rise to
+        the level of a named "claim" is still retained for future sessions.
+        Long-term memory deduplicates near-identical content on write, so the
+        per-step and end-of-session passes do not create duplicates.
 
         Parameters
         ----------
@@ -400,6 +404,8 @@ class SearchResultStore:
             The original research query — used to rank chunks before persisting.
         top_k:
             Maximum number of chunks to write to long-term memory.
+        step_id_filter:
+            If set, only persist chunks belonging to this step id.
 
         Returns
         -------
@@ -412,7 +418,12 @@ class SearchResultStore:
             )
             return 0
 
-        active_chunks = [c for c in self._chunks if not c.superseded]
+        active_chunks = [
+            c
+            for c in self._chunks
+            if not c.superseded
+            and (step_id_filter is None or c.step_id == step_id_filter)
+        ]
         if not active_chunks:
             return 0
 

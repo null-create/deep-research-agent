@@ -2,9 +2,13 @@
 module.exports = {
   content: [
     "./index.html",
-    "./src/**/*.{js,jsx,ts,tsx}",
-    "./**/*.tsx",
-    "./**/*.ts",
+    "./*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./contexts/**/*.{ts,tsx}",
+    "./hooks/**/*.{ts,tsx}",
+    "./utils/**/*.{ts,tsx}",
+    "./api/**/*.{ts,tsx}",
+    "./types/**/*.{ts,tsx}",
   ],
   darkMode: 'class',
   theme: {

@@ -38,17 +38,20 @@ export const DocsViewer: React.FC<DocsViewerProps> = ({ onClose }) => {
       .finally(() => setLoadingList(false));
   }, []);
 
-  // Load doc content when selection changes
+  // Load doc content when selection changes — use an ignore flag to prevent
+  // a stale earlier response from overwriting a newer selection.
   useEffect(() => {
     if (!selectedDoc) return;
+    let ignore = false;
     setLoadingContent(true);
     setContent(null);
     setError(null);
     apiClient
       .getDoc(selectedDoc)
-      .then(setContent)
-      .catch(() => setError(`Failed to load "${toReadableTitle(selectedDoc)}".`))
-      .finally(() => setLoadingContent(false));
+      .then((result) => { if (!ignore) setContent(result); })
+      .catch(() => { if (!ignore) setError(`Failed to load "${toReadableTitle(selectedDoc)}".`); })
+      .finally(() => { if (!ignore) setLoadingContent(false); });
+    return () => { ignore = true; };
   }, [selectedDoc]);
 
   // Close on Escape key
@@ -67,22 +70,25 @@ export const DocsViewer: React.FC<DocsViewerProps> = ({ onClose }) => {
     /* Backdrop */
     <div
       className="fixed inset-0 z-50 flex items-stretch bg-black/50 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Documentation"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      {/* Modal panel */}
-      <div className="relative flex w-full max-w-6xl mx-auto my-6 bg-white dark:bg-gray-900 rounded-xl shadow-2xl overflow-hidden">
+      {/* Modal panel — stacks vertically on small screens */}
+      <div className="relative flex flex-col sm:flex-row w-full max-w-6xl mx-auto my-6 bg-white dark:bg-gray-900 rounded-xl shadow-2xl overflow-hidden">
 
         {/* ── Left sidebar: doc list ── */}
-        <aside className="w-56 flex-shrink-0 flex flex-col border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+        <aside className="w-full sm:w-56 flex-shrink-0 flex flex-col border-b sm:border-b-0 sm:border-r border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 max-h-48 sm:max-h-none">
           <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
             <BookOpen className="w-4 h-4 text-indigo-500 flex-shrink-0" />
             <span className="text-sm font-semibold text-gray-700 dark:text-gray-200 truncate">
               Documentation
             </span>
           </div>
-          <nav className="flex-1 overflow-y-auto py-2">
+          <nav className="flex-1 overflow-y-auto py-2" aria-label="Documentation pages">
             {loadingList && (
               <p className="px-4 py-3 text-xs text-gray-400">Loading…</p>
             )}
@@ -91,12 +97,13 @@ export const DocsViewer: React.FC<DocsViewerProps> = ({ onClose }) => {
                 key={filename}
                 onClick={() => setSelectedDoc(filename)}
                 className={`w-full flex items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors ${selectedDoc === filename
-                    ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 font-medium'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-gray-100'
+                  ? 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 font-medium'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-gray-100'
                   }`}
+                aria-current={selectedDoc === filename ? 'page' : undefined}
               >
                 {selectedDoc === filename && (
-                  <ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-indigo-500" />
+                  <ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-indigo-500" aria-hidden="true" />
                 )}
                 <span className={selectedDoc === filename ? '' : 'ml-5'}>
                   {toReadableTitle(filename)}
@@ -116,7 +123,7 @@ export const DocsViewer: React.FC<DocsViewerProps> = ({ onClose }) => {
             <button
               onClick={onClose}
               className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-              title="Close"
+              aria-label="Close documentation"
             >
               <X className="w-5 h-5 text-gray-500 dark:text-gray-400" />
             </button>

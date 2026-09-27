@@ -865,7 +865,7 @@ class KnowledgeGraph:
                 f"YIELD node, score "
                 f"RETURN node, score{extra_return_fields}"
             )
-            subqueries.append(f"{{ {sq} }}")
+            subqueries.append(sq)
 
         union = " UNION ALL ".join(subqueries)
         outer = (
@@ -927,6 +927,7 @@ class KnowledgeGraph:
                     )
                     result = await session.run(
                         f"{union_q} "
+                        "WITH node, score "
                         "WHERE score >= $threshold "
                         "RETURN node, score LIMIT 1",
                         vector=vector,
@@ -1047,6 +1048,19 @@ class KnowledgeGraph:
     # Relationship CRUD
     # ------------------------------------------------------------------
 
+    async def _entity_exists(self, name: str) -> bool:
+        """Return True if an entity node with *name* already exists."""
+        if not self.available or not name.strip():
+            return False
+        assert self._driver is not None
+        all_labels = "|".join(ENTITY_TYPES)
+        async with self._driver.session(database=self._database) as session:
+            result = await session.run(
+                f"MATCH (n:{all_labels} {{name: $name}}) RETURN n.id AS id LIMIT 1",
+                name=name.strip(),
+            )
+            return (await result.single()) is not None
+
     async def store_relationship(
         self,
         source: str,
@@ -1084,6 +1098,19 @@ class KnowledgeGraph:
         rel = relation.strip()
         evid = evidence.strip()
         rel_label = relationship_label or classify_relation(rel)
+
+        # Guarantee both endpoints exist before the MATCH ... MATCH ... CREATE
+        # below. If either entity is missing, that pattern binds nothing, the
+        # CREATE silently no-ops, and the edge is lost — yet the method would
+        # still report success. Auto-create any missing endpoint as a generic
+        # concept entity so relationships are never silently dropped.
+        for endpoint in (src, tgt):
+            if not await self._entity_exists(endpoint):
+                await self.upsert_entity(
+                    name=endpoint,
+                    entity_type="concept",
+                    session_id=session_id,
+                )
 
         # Build Cypher that matches any typed entity node for source/target.
         # We can't know the label of source/target at this point, so we use

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { Conversation, Message } from '../types/conversation';
 import { useConversations } from '../hooks/useConversations';
 
@@ -140,34 +140,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('deep_research_is_researching', String(isResearching));
   }, [isResearching]);
 
+  const contextValue = useMemo<AppContextType>(() => ({
+    messages,
+    addMessage,
+    updateMessage,
+    createConversation,
+    addMessageToConv,
+    updateMessageInConv,
+    patchMessageInConv,
+    files,
+    setFiles,
+    isResearching,
+    setIsResearching,
+    conversations,
+    activeConversationId,
+    selectConversation,
+    startNewChat,
+    renameConversation: renameConv,
+    deleteConversation,
+    pendingPlan,
+    setPendingPlan,
+    planStatus,
+    setPlanStatus,
+    setEventIndex,
+    getEventIndex,
+  }), [
+    messages, addMessage, updateMessage, createConversation,
+    addMessageToConv, updateMessageInConv, patchMessageInConv,
+    files, setFiles, isResearching, setIsResearching,
+    conversations, activeConversationId, selectConversation,
+    startNewChat, renameConv, deleteConversation,
+    pendingPlan, setPendingPlan, planStatus, setPlanStatus,
+    setEventIndex, getEventIndex,
+  ]);
+
   return (
-    <AppContext.Provider
-      value={{
-        messages,
-        addMessage,
-        updateMessage,
-        createConversation,
-        addMessageToConv,
-        updateMessageInConv,
-        patchMessageInConv,
-        files,
-        setFiles,
-        isResearching,
-        setIsResearching,
-        conversations,
-        activeConversationId,
-        selectConversation,
-        startNewChat,
-        renameConversation: renameConv,
-        deleteConversation,
-        pendingPlan,
-        setPendingPlan,
-        planStatus,
-        setPlanStatus,
-        setEventIndex,
-        getEventIndex,
-      }}
-    >
+    <AppContext.Provider value={contextValue}>
       {children}
     </AppContext.Provider>
   );

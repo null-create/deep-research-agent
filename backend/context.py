@@ -94,9 +94,7 @@ class ResearchContext:
             if rec.step_id == step_id:
                 rec.superseded = True
         if reason:
-            logger.debug(
-                "[ResearchContext] Step %d superseded: %s", step_id, reason
-            )
+            logger.debug("[ResearchContext] Step %d superseded: %s", step_id, reason)
 
     def retrieve_relevant(
         self,
@@ -120,20 +118,17 @@ class ResearchContext:
         total injected tokens remain bounded even across many steps.
         """
         active_records = [
-            rec for rec in self._step_records
+            rec
+            for rec in self._step_records
             if include_superseded or not rec.superseded
         ]
         if not active_records:
             return ""
 
-        corpus_for_scoring = [
-            f"{rec.description} {rec.text}" for rec in active_records
-        ]
+        corpus_for_scoring = [f"{rec.description} {rec.text}" for rec in active_records]
         try:
             scores = tfidf_similarity(query, corpus_for_scoring)
-            scored: List[Tuple[float, _StepRecord]] = list(
-                zip(scores, active_records)
-            )
+            scored: List[Tuple[float, _StepRecord]] = list(zip(scores, active_records))
             scored.sort(key=lambda x: x[0], reverse=True)
             top_records = [rec for _, rec in scored[:top_k]]
         except Exception as exc:

@@ -21,7 +21,7 @@
    - [Tools](#tools-web-search)
    - [Result Shapes](#result-shapes)
    - [Configuration](#configuration-web-search)
-4. [Web Scraper Server](#web-scraper-server)
+4. [Fetch Server](#fetch-server)
    - [Purpose](#purpose-web-scraper)
    - [Scraping Pipeline](#scraping-pipeline)
    - [Tools](#tools-web-scraper)
@@ -322,11 +322,12 @@ No API keys are required for DuckDuckGo, Wikipedia, or arXiv. All search backend
 
 ---
 
-## Web Scraper Server
+## Fetch Server
 
-> **Directory:** `mcp/web_scrape/`  
+> **Directory:** `mcp/fetch/`  
 > **Port:** `9292`  
-> **Service name:** `mcp-web-scraping-server`
+> **Service name:** `mcp-fetch-server`  
+> **Registry key:** `fetch`
 
 ### Purpose
 
@@ -389,7 +390,7 @@ The `httpx` client is a **module-level singleton** with `follow_redirects=True`.
 
 ### Tools (Web Scraper)
 
-#### `scrape_url`
+#### `fetch_url`
 
 Fetches and extracts the complete content of a web page.
 
@@ -654,11 +655,11 @@ The agent interacts with these servers at different points in the research lifec
 | Phase | Component | Call | Purpose |
 |---|---|---|---|
 | `_execute_step` | Web Search MCP | `web_search`, `search_wikipedia`, `search_github` | Find relevant URLs and snippets |
-| `_execute_step` | Web Scraper MCP | `scrape_url` | Fetch full page content from URLs found by search |
+| `_execute_step` | Fetch MCP | `fetch_url` | Fetch full page content from URLs found by search |
 | `_execute_step` | File Handler MCP | `read_file`, `list_files` | Read any uploaded reference documents |
 | `synthesize_results` | File Handler MCP | `write_file` | Save the final Markdown research report |
 
-In the v2 Orchestrator, the same servers are used but routing goes through the specialist sub-agents: the `SearchAgent` primarily drives `web_search` and `scrape_url`, while the `ReportComposer` output is saved manually by the Orchestrator after `synthesise()` completes.
+In the Orchestrator, the same servers are used but routing goes through the specialist sub-agents: the `SearchAgent` primarily drives `web_search` and `fetch_url`, while the `ReportComposer` output is saved by the Orchestrator after `synthesise()` completes.
 
 ---
 
@@ -680,7 +681,7 @@ Verify individual MCP server health:
 
 ```bash
 curl http://localhost:9393/health   # Web Search
-curl http://localhost:9292/health   # Web Scraper
+curl http://localhost:9292/health   # Fetch
 curl http://localhost:9191/health   # File Handler
 ```
 
