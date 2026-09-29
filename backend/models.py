@@ -123,9 +123,6 @@ class ConfigUpdate(BaseModel):
     analyst_max_tokens: Optional[int] = None
     qa_max_tokens: Optional[int] = None
 
-    # Legacy field kept for backward compat with existing callers
-    model: Optional[str] = None
-
 
 class SynthesisResult(BaseModel):
     summary: str
@@ -177,6 +174,19 @@ class ResearchStep:
             "parallel_group": self.parallel_group,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ResearchStep":
+        """Reconstruct a ResearchStep from its ``to_dict`` output."""
+        return cls(
+            id=int(data["id"]),
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            status=StepStatus(data.get("status", StepStatus.PENDING.value)),
+            result=data.get("result") or None,
+            error=data.get("error") or None,
+            parallel_group=data.get("parallel_group"),
+        )
+
 
 class ResearchPlan:
     id: str
@@ -194,3 +204,21 @@ class ResearchPlan:
             "goal": self.goal,
             "steps": [step.to_dict() for step in self.steps],
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ResearchPlan":
+        """Reconstruct a ResearchPlan (preserving ``id``) from its ``to_dict`` output.
+
+        Used by session recovery to rebuild ``Orchestrator._pending_plan`` from
+        a persisted checkpoint so ``approve_plan`` can proceed after a restart.
+        """
+        plan = cls(
+            goal=data.get("goal", ""),
+            steps=[ResearchStep.from_dict(s) for s in data.get("steps", [])],
+        )
+        # Preserve the original plan id so ``approve_plan``'s planId check
+        # against the client's stored id continues to match.
+        pid = data.get("id")
+        if pid:
+            plan.id = pid
+        return plan

@@ -1419,21 +1419,40 @@ class Orchestrator:
                         for r in recent_recs
                     )
                 )
-            _search_status: List[ResponseMessage] = []
-            search_result = await self._run_search(
-                step,
-                query,
-                tools,
-                extra_context=(
-                    f"Relevant findings from prior steps:\n{prior_context}{rec_text}"
-                    if prior_context or rec_text
-                    else ""
-                ),
-                status_sink=_search_status,
-                ltm_context=getattr(self, "_batch_memory", "") or None,
+            # P1-3: run SearchAgent as a background task and stream its
+            # iteration-status events over the WebSocket live, rather than
+            # batching them until after ``_run_search`` returns.  A short
+            # polling timeout keeps CPU usage negligible while still yielding
+            # events to the client with sub-second latency.
+            _status_queue: "asyncio.Queue[ResponseMessage]" = asyncio.Queue()
+            _search_task = asyncio.create_task(
+                self._run_search(
+                    step,
+                    query,
+                    tools,
+                    extra_context=(
+                        f"Relevant findings from prior steps:\n{prior_context}{rec_text}"
+                        if prior_context or rec_text
+                        else ""
+                    ),
+                    status_queue=_status_queue,
+                    ltm_context=getattr(self, "_batch_memory", "") or None,
+                )
             )
-            for _msg in _search_status:
-                yield _msg
+            while not _search_task.done():
+                try:
+                    _msg = await asyncio.wait_for(_status_queue.get(), timeout=0.25)
+                    yield _msg
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    _search_task.cancel()
+                    raise
+            # Drain any status events that landed in the queue between the
+            # last poll and task completion.
+            while not _status_queue.empty():
+                yield _status_queue.get_nowait()
+            search_result = await _search_task
             all_tools_used: List[str] = list(search_result.pop("_tools_used", []) or [])
             self.context.save_step(f"search_step_{step.id}", json.dumps(search_result))
 
@@ -1670,16 +1689,30 @@ class Orchestrator:
                     chunks_before = self._search_store.chunk_count(
                         include_superseded=False
                     )
-                    _supp_status: List[ResponseMessage] = []
-                    supplemental_search = await self._run_search(
-                        step,
-                        query,
-                        tools,
-                        extra_context=targeted_ctx,
-                        status_sink=_supp_status,
+                    _supp_queue: "asyncio.Queue[ResponseMessage]" = asyncio.Queue()
+                    _supp_task = asyncio.create_task(
+                        self._run_search(
+                            step,
+                            query,
+                            tools,
+                            extra_context=targeted_ctx,
+                            status_queue=_supp_queue,
+                        )
                     )
-                    for _msg in _supp_status:
-                        yield _msg
+                    while not _supp_task.done():
+                        try:
+                            _msg = await asyncio.wait_for(
+                                _supp_queue.get(), timeout=0.25
+                            )
+                            yield _msg
+                        except asyncio.TimeoutError:
+                            continue
+                        except asyncio.CancelledError:
+                            _supp_task.cancel()
+                            raise
+                    while not _supp_queue.empty():
+                        yield _supp_queue.get_nowait()
+                    supplemental_search = await _supp_task
                     chunks_after = self._search_store.chunk_count(
                         include_superseded=False
                     )
@@ -2242,6 +2275,17 @@ class Orchestrator:
                 + "\n".join(contra_lines)
             )
 
+        # P1-6: batch-embed every section's RAG query up-front so per-section
+        # ``_search_store.retrieve`` calls hit a warm cache instead of doing
+        # one embedding round-trip apiece.  Best-effort — silently skips if
+        # embeddings are unavailable (retrieval falls back to TF-IDF).
+        _section_queries = [
+            f"{section.get('title', f'Section {i}')}: "
+            f"{section.get('description', '')} — {query}"
+            for i, section in enumerate(sections, start=1)
+        ]
+        await self._search_store.warm_query_cache(_section_queries)
+
         for sec_idx, section in enumerate(sections, start=1):
             sec_title = section.get("title", f"Section {sec_idx}")
             sec_desc = section.get("description", "")
@@ -2252,7 +2296,6 @@ class Orchestrator:
                 query=rag_query,
                 top_k=config.section_draft_top_k,
             )
-
             # Build a focused drafting prompt (swap context in/out per section)
             draft_prompt_parts = [
                 f"Research Query: {query}",
@@ -2271,8 +2314,19 @@ class Orchestrator:
                     "'%s' — falling back to raw analyst output.",
                     sec_title,
                 )
-                # Last-resort fallback: pull relevant subset from analyst output
+                # Last-resort fallback: pull relevant subset from analyst output.
+                # We hard-cap at 6000 chars to keep prompt size bounded; log
+                # when this truncation loses content so operators can spot
+                # sections that are being drafted from a partial view.
                 analyst_str = json.dumps(self._analyst_output, indent=2)
+                if len(analyst_str) > 6000:
+                    logger.warning(
+                        "[Synthesis] Analyst-output fallback truncated for section "
+                        "'%s': %d chars → 6000 (%.1f%% dropped).",
+                        sec_title,
+                        len(analyst_str),
+                        100.0 * (1 - 6000 / len(analyst_str)),
+                    )
                 draft_prompt_parts.append(f"Research Findings:\n{analyst_str[:6000]}")
             if structured_tensions_block:
                 draft_prompt_parts.append(structured_tensions_block)
@@ -2647,6 +2701,35 @@ class Orchestrator:
             "contradictions": [c.to_dict() for c in self._contradictions],
         }
 
+    def plan_checkpoint(self) -> Dict[str, Any]:
+        """Return serializable plan-phase state for persistence across restarts.
+
+        Captures the pending plan (if any) plus the query so a session that is
+        sitting in ``awaiting_approval`` can be fully reconstructed after a
+        crash — including the ``_pending_plan`` that ``approve_plan`` requires.
+        """
+        return {
+            "query": self.context.get_step_result("query") or "",
+            "pending_plan": (
+                self._pending_plan.to_dict() if self._pending_plan else None
+            ),
+        }
+
+    def restore_plan_state(self, checkpoint: Dict[str, Any]) -> None:
+        """Restore ``_pending_plan`` (and seeded query context) from a checkpoint.
+
+        Called during session recovery for sessions persisted in the
+        ``awaiting_approval`` state so ``approve_plan`` can proceed against
+        the reconstructed Orchestrator.
+        """
+        query = checkpoint.get("query", "")
+        if query:
+            self.context.save_step("query", query)
+        plan_dict = checkpoint.get("pending_plan")
+        if plan_dict:
+            self._pending_plan = ResearchPlan.from_dict(plan_dict)
+            self.context.save_step("plan", json.dumps(plan_dict))
+
     def restore_synthesis_state(self, checkpoint: Dict[str, Any]) -> None:
         """Restore synthesis inputs from a persisted checkpoint.
 
@@ -2679,7 +2762,7 @@ class Orchestrator:
             )
         query = checkpoint.get("query", "")
         if query:
-            self.context.store_step_result("query", query)
+            self.context.save_step("query", query)
 
     def get_agent_pool(self) -> AgentPool:
         """Expose the agent pool for inspection or reconfiguration."""
@@ -2888,6 +2971,7 @@ Return ONLY a JSON object:
         tools: List[Dict[str, Any]],
         extra_context: Optional[str] = None,
         status_sink: Optional[List] = None,
+        status_queue: "Optional[asyncio.Queue[ResponseMessage]]" = None,
         ltm_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the SearchAgent for a single plan step.
@@ -2898,7 +2982,14 @@ Return ONLY a JSON object:
             Optional list to accumulate ``ResponseMessage`` status events as
             each search iteration completes.  The caller can flush this list
             with ``yield`` after the function returns to surface per-iteration
-            progress to the WebSocket client.
+            progress to the WebSocket client.  Prefer ``status_queue`` for new
+            call sites — it enables live streaming of progress events instead
+            of the batched (post-hoc) delivery ``status_sink`` provides.
+        status_queue:
+            Optional asyncio queue.  When supplied, iteration-progress events
+            are ``put_nowait``-ed onto it as they happen.  The caller can
+            drain the queue concurrently (e.g. via a helper task alongside
+            this coroutine) to yield the events to the WebSocket immediately.
         """
         prompt_parts = [
             f"Overall Research Goal: {query}",
@@ -2950,16 +3041,21 @@ Return ONLY a JSON object:
                     -config.max_search_history_messages :
                 ]
 
-            if status_sink is not None:
-                status_sink.append(
-                    ResponseMessage(
-                        type="status",
-                        message=(
-                            f"[Search] Step {step.id} — "
-                            f"iteration {iteration + 1}/{config.max_iterations}…"
-                        ),
-                    )
+            if status_sink is not None or status_queue is not None:
+                _status_msg = ResponseMessage(
+                    type="status",
+                    message=(
+                        f"[Search] Step {step.id} — "
+                        f"iteration {iteration + 1}/{config.max_iterations}…"
+                    ),
                 )
+                if status_sink is not None:
+                    status_sink.append(_status_msg)
+                if status_queue is not None:
+                    try:
+                        status_queue.put_nowait(_status_msg)
+                    except asyncio.QueueFull:
+                        pass  # drop rather than block search progress
 
             response = await self.agents.search.run(
                 prompt="\n\n".join(prompt_parts),

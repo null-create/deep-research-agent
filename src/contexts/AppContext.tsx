@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Conversation, Message } from '../types/conversation';
 import { useConversations } from '../hooks/useConversations';
 
@@ -33,6 +33,16 @@ interface AppContextType {
   // Event index tracking (for accurate replay after browser close)
   setEventIndex: (convId: string, index: number) => void;
   getEventIndex: (convId: string) => number;
+  // Per-conversation session tracking (P0-1 fix — replaces singleton
+  // ``deep_research_session_id`` localStorage key so multiple conversations
+  // can hold independent backend sessions).
+  setSessionId: (convId: string, sessionId: string | null) => void;
+  setSessionState: (convId: string, state: Conversation['sessionState']) => void;
+  findConvBySessionId: (sessionId: string) => string | null;
+  // A callback registered by the WebSocket layer that switches the backend's
+  // active drain to a given session id.  Called by ``selectConversation`` so
+  // switching conversations transparently resumes the correct session.
+  onActivateSession: React.MutableRefObject<((sessionId: string) => void) | null>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -51,7 +61,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getActiveConversation,
     setEventIndex,
     getEventIndex,
+    setSessionId,
+    setSessionState,
+    findConvBySessionId,
   } = useConversations();
+
+  // ── Session activation bridge (P0-1) ──────────────────────────────────
+  // The WebSocket layer registers a handler here that sends a ``resume``
+  // message for a given session id.  ``selectConversation`` invokes it
+  // when the newly-active conversation has a live session so the backend
+  // switches its drain to the right pipeline.
+  const onActivateSession = useRef<((sessionId: string) => void) | null>(null);
 
   const addMessageToConv = useCallback(
     (convId: string, msg: Message) => addMessageToConversation(convId, msg),
@@ -102,11 +122,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const selectConversation = useCallback(
     (id: string) => {
       setActiveConversationId(id);
-      setIsResearching(false);
-      setPendingPlan(null);
-      setPlanStatus('none');
+      const target = conversations.find((c) => c.id === id);
+      const liveStates: Array<Conversation['sessionState']> = [
+        'planning',
+        'awaiting_approval',
+        'executing',
+      ];
+      // If the selected conversation still has a running backend session,
+      // ask the WebSocket layer to resume it so its events start flowing
+      // again.  Reset the local plan / researching flags first — the
+      // ``session_resumed`` reply will re-populate them.
+      if (target?.sessionId && liveStates.includes(target.sessionState)) {
+        setIsResearching(false);
+        setPendingPlan(null);
+        setPlanStatus('none');
+        onActivateSession.current?.(target.sessionId);
+      } else {
+        setIsResearching(false);
+        setPendingPlan(null);
+        setPlanStatus('none');
+      }
     },
-    [setActiveConversationId]
+    [conversations, setActiveConversationId]
   );
 
   const deleteConversation = useCallback(
@@ -123,6 +160,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const startNewChat = useCallback(() => {
+    // Creating a new conversation must NOT stop any running research in the
+    // previous conversation — the previous session keeps its ``sessionId``
+    // and can be resumed by re-selecting it.  We only reset the *local*
+    // plan / researching UI flags for the new (empty) conversation.
     createConversation();
     setIsResearching(false);
     setPendingPlan(null);
@@ -164,6 +205,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPlanStatus,
     setEventIndex,
     getEventIndex,
+    setSessionId,
+    setSessionState,
+    findConvBySessionId,
+    onActivateSession,
   }), [
     messages, addMessage, updateMessage, createConversation,
     addMessageToConv, updateMessageInConv, patchMessageInConv,
@@ -172,6 +217,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     startNewChat, renameConv, deleteConversation,
     pendingPlan, setPendingPlan, planStatus, setPlanStatus,
     setEventIndex, getEventIndex,
+    setSessionId, setSessionState, findConvBySessionId,
   ]);
 
   return (

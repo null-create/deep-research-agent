@@ -155,12 +155,26 @@ class SessionStore:
         return self._sessions.get(session_id)
 
     def remove(self, session_id: str) -> None:
-        """Remove the session and cancel its background task if still running."""
+        """Remove the session and cancel its background task if still running.
+
+        Also deletes the on-disk checkpoint file (if any) so pruned sessions
+        do not leave behind orphan JSON blobs in ``logs/sessions/``.
+        """
         session = self._sessions.pop(session_id, None)
         if session is None:
             return
         if session.background_task and not session.background_task.done():
             session.background_task.cancel()
+        # Delete the on-disk checkpoint, if it exists.  Best-effort: a
+        # missing or permission-denied file must never break session removal.
+        try:
+            path = self._session_file(session_id)
+            if path.exists():
+                path.unlink()
+        except Exception as exc:
+            logger.debug(
+                "Could not delete checkpoint for session %s: %s", session_id, exc
+            )
         logger.info("Session removed: %s", session_id)
 
     # ------------------------------------------------------------------
@@ -174,11 +188,26 @@ class SessionStore:
         self,
         session: ResearchSession,
         synthesis_checkpoint: Optional[Dict[str, Any]] = None,
+        plan_checkpoint: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist session replay_log and state to disk.
 
         Writes atomically via a .tmp intermediate so a crash mid-write never
         produces a corrupted checkpoint file.
+
+        Parameters
+        ----------
+        session:
+            The live session to serialize.
+        synthesis_checkpoint:
+            Optional dict from ``Orchestrator.synthesis_checkpoint()``.  Present
+            only after ``execute()`` completes so ``synthesize()`` can be
+            re-run on recovery.
+        plan_checkpoint:
+            Optional dict from ``Orchestrator.plan_checkpoint()``.  Present
+            for sessions persisted in the ``awaiting_approval`` state so
+            ``_pending_plan`` can be restored and ``approve_plan`` can
+            proceed after a restart.
         """
         data: Dict[str, Any] = {
             "session_id": session.session_id,
@@ -188,6 +217,8 @@ class SessionStore:
         }
         if synthesis_checkpoint is not None:
             data["synthesis_checkpoint"] = synthesis_checkpoint
+        if plan_checkpoint is not None:
+            data["plan_checkpoint"] = plan_checkpoint
         try:
             path = self._session_file(session.session_id)
             tmp = path.with_suffix(".tmp")

@@ -145,17 +145,25 @@ async def lifespan(app: FastAPI):
     logger.info("Long-term memory store initialized at %s.", cfg.neo4j_uri)
     if cfg.agent_mode == "self-optimization":
         app.state.agent = SelfOptimizingAgent(
-            model_backend, mcp_registry, long_term_memory=long_term_memory
+            model_backend,
+            mcp_registry,
+            long_term_memory=long_term_memory,
+            config=app.state.config,
         )
         logger.info("Initialized Self-Optimizing Agent in self-optimization mode.")
     else:
-        app.state.agent = ResearchAgent(model_backend, mcp_registry)
+        app.state.agent = ResearchAgent(
+            model_backend, mcp_registry, config=app.state.config
+        )
         logger.info("Agent is initialized and ready to accept requests.")
 
     # Always initialise a dedicated SelfOptimizingAgent so the self_optimize
     # WebSocket command is available regardless of the AGENT_MODE setting.
     app.state.self_optimizing_agent = SelfOptimizingAgent(
-        model_backend, mcp_registry, long_term_memory=long_term_memory
+        model_backend,
+        mcp_registry,
+        long_term_memory=long_term_memory,
+        config=app.state.config,
     )
     logger.info("Self-optimizing agent initialized.")
 
@@ -334,14 +342,28 @@ async def _recover_session_from_checkpoint(
 ) -> ResearchSession:
     """Reconstruct an in-memory session from a disk checkpoint.
 
-    If execute() completed (synthesis_checkpoint present) but no ``report``
-    event was emitted, re-runs synthesize() in a background task so the client
-    receives the report on reconnect.
+    Handles three recovery paths:
+
+    * **Synthesis recovery** — ``synthesis_checkpoint`` present, no ``report``
+      event yet: restores synthesis state and re-runs ``synthesize()`` as a
+      tracked background job.
+    * **Execute recovery** — ``plan_checkpoint`` present, state was
+      ``executing`` (no synthesis_checkpoint means the crash happened
+      mid-execute): restores the pending plan and re-runs
+      ``execute() → synthesize()`` from scratch.  Duplicate step events will
+      appear in the replay log; clients dedup on the replay_log length.
+    * **Plan-approval recovery** — ``plan_checkpoint`` present, state was
+      ``awaiting_approval``: restores ``_pending_plan`` so ``approve_plan``
+      succeeds after the client reconnects.  No background job is started.
+    * **Replay-only** — none of the above (session already complete / error /
+      cancelled or missing checkpoint data): mark complete and let the drain
+      flush the replay_log.
     """
     session_id = checkpoint_data["session_id"]
     saved_state = checkpoint_data.get("state", "unknown")
     replay_log: list = checkpoint_data.get("replay_log", [])
     syn_checkpoint: dict | None = checkpoint_data.get("synthesis_checkpoint")
+    plan_checkpoint: dict | None = checkpoint_data.get("plan_checkpoint")
 
     # Check whether the report was already delivered in a previous run.
     report_delivered = any(evt.get("type") == "report" for evt in replay_log)
@@ -353,61 +375,150 @@ async def _recover_session_from_checkpoint(
     session.replay_log = list(replay_log)
     session.state = saved_state
 
-    needs_synthesis = (
-        syn_checkpoint is not None
-        and not report_delivered
-        and saved_state not in ("error", "cancelled")
-    )
+    terminal = saved_state in ("error", "cancelled", "complete") or report_delivered
 
-    if not needs_synthesis:
-        # Replay-only: mark complete so drain can exit after flushing.
-        session.state = saved_state
-        session.complete = True
-        session.finish()
+    # ── Case 1: synthesis recovery ──────────────────────────────────────────
+    if syn_checkpoint is not None and not terminal:
+        orchestrator.restore_synthesis_state(syn_checkpoint)
         logger.info(
-            "[ws][%s] Recovered from disk (state=%s, events=%d) — replay only.",
+            "[ws][%s] Recovered from disk (state=%s, events=%d) — re-running synthesis.",
             session_id,
             saved_state,
             len(session.replay_log),
         )
+
+        async def _rerun_synthesis(s: ResearchSession = session) -> None:
+            try:
+                async for event in s.orchestrator.synthesize():
+                    s.emit(make_serializable(event.model_dump()))
+                s.state = "complete"
+            except asyncio.CancelledError:
+                s.state = "cancelled"
+                s.emit({"type": "error", "message": "Synthesis was cancelled."})
+            except Exception as exc:
+                logger.exception(
+                    "[ws][%s] Synthesis recovery error: %s", s.session_id, exc
+                )
+                s.state = "error"
+                s.emit({"type": "error", "message": str(exc)})
+            finally:
+                s.complete = True
+                s.new_event.set()
+                s.finish()
+                try:
+                    session_store.persist(s)
+                except Exception:
+                    pass
+
+        job = await session_manager.start_job(
+            session_id=session_id,
+            coro=_rerun_synthesis(),
+        )
+        session.background_task = job.task
         return session
 
-    # Re-run synthesis using the restored orchestrator state.
-    orchestrator.restore_synthesis_state(syn_checkpoint)
+    # ── Case 2: execute recovery (crashed mid-execute) ──────────────────────
+    if (
+        plan_checkpoint is not None
+        and saved_state == "executing"
+        and not terminal
+    ):
+        orchestrator.restore_plan_state(plan_checkpoint)
+        if orchestrator._pending_plan is None:
+            logger.warning(
+                "[ws][%s] Execute-recovery skipped — plan_checkpoint missing pending_plan.",
+                session_id,
+            )
+        else:
+            logger.info(
+                "[ws][%s] Recovered from disk (state=executing, events=%d) — "
+                "re-running execute + synthesize from scratch.",
+                session_id,
+                len(session.replay_log),
+            )
+            session.emit(
+                {
+                    "type": "status",
+                    "message": "Server restarted mid-execute — restarting research from the approved plan.",
+                }
+            )
+
+            async def _rerun_execute(s: ResearchSession = session) -> None:
+                syn_ck: dict | None = None
+                try:
+                    async for event in s.orchestrator.execute():
+                        s.emit(make_serializable(event.model_dump()))
+                    try:
+                        syn_ck = s.orchestrator.synthesis_checkpoint()
+                        session_store.persist(s, synthesis_checkpoint=syn_ck)
+                    except Exception:
+                        pass
+                    async for event in s.orchestrator.synthesize():
+                        s.emit(make_serializable(event.model_dump()))
+                    s.state = "complete"
+                except asyncio.CancelledError:
+                    s.state = "cancelled"
+                    s.emit({"type": "error", "message": "Recovered research was cancelled."})
+                except Exception as exc:
+                    logger.exception(
+                        "[ws][%s] Execute-recovery error: %s", s.session_id, exc
+                    )
+                    s.state = "error"
+                    s.emit({"type": "error", "message": str(exc)})
+                finally:
+                    s.complete = True
+                    s.new_event.set()
+                    s.finish()
+                    try:
+                        session_store.persist(s, synthesis_checkpoint=syn_ck)
+                    except Exception:
+                        pass
+                    try:
+                        s.orchestrator.release_memory()
+                    except Exception:
+                        pass
+
+            job = await session_manager.start_job(
+                session_id=session_id,
+                coro=_rerun_execute(),
+            )
+            session.background_task = job.task
+            return session
+
+    # ── Case 3: plan-approval recovery (server restarted while awaiting user) ──
+    if (
+        plan_checkpoint is not None
+        and saved_state == "awaiting_approval"
+        and not terminal
+    ):
+        orchestrator.restore_plan_state(plan_checkpoint)
+        if orchestrator._pending_plan is None:
+            logger.warning(
+                "[ws][%s] Plan-recovery skipped — plan_checkpoint missing pending_plan.",
+                session_id,
+            )
+        else:
+            logger.info(
+                "[ws][%s] Recovered from disk (state=awaiting_approval, events=%d) — "
+                "plan restored; waiting for client approval.",
+                session_id,
+                len(session.replay_log),
+            )
+        # Do NOT mark complete — the session is live, waiting for a client
+        # decision.  new_event is untouched so a fresh drain (started by the
+        # resume handler) will replay the log and then park on the wait.
+        return session
+
+    # ── Case 4: replay-only (already done, errored, cancelled, or unrecoverable) ──
+    session.state = saved_state
+    session.complete = True
+    session.finish()
     logger.info(
-        "[ws][%s] Recovered from disk (state=%s, events=%d) — re-running synthesis.",
+        "[ws][%s] Recovered from disk (state=%s, events=%d) — replay only.",
         session_id,
         saved_state,
         len(session.replay_log),
     )
-
-    async def _rerun_synthesis(s: ResearchSession = session) -> None:
-        try:
-            async for event in s.orchestrator.synthesize():
-                serialized = make_serializable(event.model_dump())
-                s.emit(serialized)
-            s.state = "complete"
-        except asyncio.CancelledError:
-            s.state = "cancelled"
-            s.emit({"type": "error", "message": "Synthesis was cancelled."})
-        except Exception as exc:
-            logger.exception("[ws][%s] Synthesis recovery error: %s", s.session_id, exc)
-            s.state = "error"
-            s.emit({"type": "error", "message": str(exc)})
-        finally:
-            s.complete = True
-            s.new_event.set()
-            s.finish()
-            try:
-                session_store.persist(s)
-            except Exception:
-                pass
-
-    job = await session_manager.start_job(
-        session_id=session_id,
-        coro=_rerun_synthesis(),
-    )
-    session.background_task = job.task
     return session
 
 
@@ -520,7 +631,32 @@ async def get_research_methods():
 
 # ── Docs endpoints ────────────────────────────────────────────────────────────
 # NOTE: /docs is reserved by FastAPI (Swagger UI). Route is /project-docs.
-_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+#
+# Resolution order (first existing directory wins):
+#   1. ``DOCS_DIR`` env var (explicit override — used by containers where the
+#      docs are bind-mounted to a non-default path).
+#   2. ``backend/docs`` — legacy location; kept so existing Docker images
+#      with the old bind-mount continue to serve content.
+#   3. repo-root ``docs`` — the actual location in the source tree; used when
+#      running the API server directly from the checkout (no bind-mount).
+def _resolve_docs_dir() -> str:
+    override = os.getenv("DOCS_DIR")
+    candidates = []
+    if override:
+        candidates.append(override)
+    here = os.path.dirname(__file__)
+    candidates.append(os.path.join(here, "docs"))
+    candidates.append(os.path.abspath(os.path.join(here, os.pardir, "docs")))
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    # Fall back to the first candidate even if missing — downstream handlers
+    # will report a 404, which is the correct signal (rather than crashing
+    # at import time).
+    return candidates[0]
+
+
+_DOCS_DIR = _resolve_docs_dir()
 
 
 @app.get("/project-docs")
@@ -788,25 +924,6 @@ async def update_config(request: Request, config_update: ConfigUpdate):
             if val is not None:
                 setattr(cfg, attr, val)
 
-        # Legacy single model field
-        if config_update.model is not None:
-            if backend == "openai":
-                cfg.openai_model = config_update.model
-            elif backend == "azure":
-                pass  # azure uses deployment_name, not a free-form model
-            elif backend == "aws":
-                cfg.aws_model = config_update.model
-            elif backend == "gcp":
-                cfg.gcp_model = config_update.model
-            elif backend == "ollama":
-                cfg.ollama_model = config_update.model
-            elif backend == "huggingface":
-                cfg.huggingface_model = config_update.model
-            elif backend == "anthropic":
-                cfg.anthropic_model = config_update.model
-            elif backend == "bedrock":
-                cfg.aws_model = config_update.model  # bedrock shares aws_* model fields
-
         # ── Persist to disk ───────────────────────────────────────────────
         _persist_settings(cfg)
 
@@ -819,7 +936,7 @@ async def update_config(request: Request, config_update: ConfigUpdate):
         request.app.state.model_backend = new_backend
         request.app.state.agent_pool = new_agent_pool
         request.app.state.agent = ResearchAgent(
-            new_backend, request.app.state.mcp_registry
+            new_backend, request.app.state.mcp_registry, config=cfg
         )
         request.app.state.config = cfg
 
@@ -1264,12 +1381,60 @@ async def research_websocket(websocket: WebSocket):
                     query,
                 )
 
-                async for event in orchestrator.plan(query):
-                    serialized = make_serializable(event.model_dump())
-                    session.emit(serialized)
-                    await websocket.send_json(serialized)
+                # Iterate the plan generator with a manual handle so a
+                # WebSocket disconnect mid-plan doesn't leak the generator or
+                # skip the state transition below.  If the socket dies, we
+                # keep draining the generator (silently) so _pending_plan is
+                # fully populated and the session can be resumed + approved
+                # on reconnect.
+                plan_stream = orchestrator.plan(query)
+                client_alive = True
+                try:
+                    async for event in plan_stream:
+                        serialized = make_serializable(event.model_dump())
+                        session.emit(serialized)
+                        if client_alive:
+                            try:
+                                await websocket.send_json(serialized)
+                            except (WebSocketDisconnect, RuntimeError):
+                                logger.info(
+                                    "[ws][%s] Client disconnected mid-plan — "
+                                    "continuing plan generation.",
+                                    session.session_id,
+                                )
+                                client_alive = False
+                finally:
+                    # Ensure the generator's finally-blocks run even if we
+                    # bailed early (defensive; plan() has no finally today).
+                    await plan_stream.aclose()
 
-                session.state = "awaiting_approval"
+                # Only advance to awaiting_approval when a plan was actually
+                # produced.  If plan() aborted before assigning _pending_plan,
+                # leave the session in "planning" state — the client's next
+                # query will start fresh.
+                if orchestrator._pending_plan is not None:
+                    session.state = "awaiting_approval"
+                    # P0-3 / P0-4: persist plan + query so a server restart
+                    # while awaiting approval preserves the plan and
+                    # approve_plan can proceed after recovery.
+                    try:
+                        session_store.persist(
+                            session,
+                            plan_checkpoint=orchestrator.plan_checkpoint(),
+                        )
+                    except Exception as _pp_exc:
+                        logger.warning(
+                            "[ws][%s] Could not persist plan checkpoint: %s",
+                            session.session_id,
+                            _pp_exc,
+                        )
+
+                # If the client disconnected mid-plan, break out of the
+                # receive loop cleanly; the outer WebSocketDisconnect handler
+                # would otherwise wait for the next message that will never
+                # arrive.
+                if not client_alive:
+                    raise WebSocketDisconnect(code=1000)
 
             # ── resume → replay log + drain live events ───────────────────────
             elif message_type == "resume":

@@ -8,6 +8,7 @@ from research_agent import ResearchAgent
 from model_backend import Message
 from observability import get_logger
 from long_term_memory import AsyncLongTermMemory
+from config import Config
 
 logger = get_logger(__name__)
 
@@ -43,8 +44,9 @@ class SelfOptimizingAgent(ResearchAgent):
         model_backend,
         mcp_registry,
         long_term_memory: Optional[AsyncLongTermMemory] = None,
+        config: Optional[Config] = None,
     ):
-        super().__init__(model_backend, mcp_registry)
+        super().__init__(model_backend, mcp_registry, config=config)
         self._long_term_memory = long_term_memory
 
     # ── File I/O helpers ──────────────────────────────────────────────────────
