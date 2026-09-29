@@ -333,19 +333,25 @@ class SearchResultStore:
     ) -> List[str]:
         """
         Remove long-term memory strings that are near-duplicate of an existing
-        session chunk (cosine similarity ≥ *similarity_threshold*).
+        session chunk (TF-IDF cosine similarity ≥ *similarity_threshold*).
 
         This prevents the ReportComposer's prompt from being padded with stale
         or superseded findings when a more recent session result already covers
         the same fact.
+
+        Uses TF-IDF (not sentence-transformer embeddings) for the dedup pass
+        because it is cheap and synchronous — good enough for lexical overlap
+        detection on the short summary strings emitted by the memory MCP
+        server.  Embedding-based dedup would give slightly better recall on
+        paraphrases but at ~50–100× the CPU cost per call.
 
         Parameters
         ----------
         memory_items:
             Plain-text memory strings from the long-term ``memory`` MCP server.
         similarity_threshold:
-            Cosine similarity cutoff.  Items scoring above this against ANY
-            active session chunk are dropped.
+            TF-IDF cosine similarity cutoff.  Items scoring above this against
+            ANY active session chunk are dropped.
 
         Returns
         -------
@@ -362,8 +368,9 @@ class SearchResultStore:
 
         kept: List[str] = []
         for mem_text in memory_items:
-            # Use the shared TF-IDF scorer as a fast local filter.
-            # If vector embeddings are available we also try cosine.
+            # Fast TF-IDF cosine similarity against active session chunks.
+            # We intentionally skip the sentence-transformer path here — see
+            # the docstring for the cost/quality tradeoff.
             corpus = [c.text for c in active_chunks]
             scores = tfidf_similarity(mem_text, corpus)
             max_score = max(scores) if scores else 0.0
@@ -658,6 +665,35 @@ class SearchResultStore:
         except Exception as exc:
             logger.debug("[SearchResultStore] _embed_query_cached failed: %s", exc)
             return None
+
+    async def warm_query_cache(self, queries: List[str]) -> None:
+        """Batch-embed several queries and stash them in the cache.
+
+        Report synthesis embeds one query per section (typically 6–10 sections).
+        Doing the encoding one-at-a-time incurs N model round-trips; batching
+        cuts that to a single ``embed_texts`` call so section drafts start
+        immediately with a warm cache.  Subsequent ``_embed_query_cached``
+        calls become in-memory dict lookups.
+
+        Silently skips queries that are already cached, empty, or if the
+        embeddings backend is unavailable — callers should treat this as a
+        best-effort optimization, not a hard dependency.
+        """
+        to_embed = [q for q in queries if q and q not in self._query_embedding_cache]
+        if not to_embed:
+            return
+        try:
+            from embeddings import embed_texts
+
+            vectors = await embed_texts(to_embed)
+        except Exception as exc:
+            logger.debug("[SearchResultStore] warm_query_cache failed: %s", exc)
+            return
+        if not vectors or len(vectors) != len(to_embed):
+            return
+        for q, vec in zip(to_embed, vectors):
+            if vec:
+                self._query_embedding_cache[q] = vec
 
     @staticmethod
     def _cosine_rank(query_vec: List[float], pool: List[Chunk]) -> List[Chunk]:

@@ -1,14 +1,11 @@
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
+from config import Config
 from mcp_client import MCPServerRegistry
 from model_backend import (
     Message,
     ModelBackend,
-    OpenAIBackend,
-    OllamaBackend,
-    AzureOpenAIBackend,
-    AWSOpenAIBackend,
-    GCPVertexAIBackend,
+    select_model_for_backend,
 )
 from models import ResearchStep
 from observability import get_logger
@@ -16,12 +13,56 @@ from observability import get_logger
 logger = get_logger(__name__)
 
 
+# Keyword sets shared with ``Orchestrator._select_model`` so both agents agree
+# on which tasks warrant the heavy vs. light model tier.
+_HEAVY_KEYWORDS = (
+    "plan",
+    "synthesize",
+    "insight",
+    "pattern",
+    "analyze",
+    "summarize",
+    "research",
+    "develop",
+    "assess",
+    "assessment",
+    "recommendation",
+    "creative application",
+    "document",
+    "report",
+)
+_LIGHT_KEYWORDS = (
+    "search",
+    "find",
+    "gather",
+    "execute",
+    "retrieve",
+    "scrape",
+    "follow links",
+    "status",
+    "message",
+    "failure",
+    "error",
+    "inform the user",
+)
+
+
 class ResearchAgent:
     """Main research agent orchestrator"""
 
-    def __init__(self, model_backend: ModelBackend, mcp_registry: MCPServerRegistry):
+    def __init__(
+        self,
+        model_backend: ModelBackend,
+        mcp_registry: MCPServerRegistry,
+        config: Optional[Config] = None,
+    ):
         self.model = model_backend
         self.mcp_servers = mcp_registry
+        # Config carries the per-backend ``*_heavy_model`` / ``*_light_model``
+        # fields that ``_select_model_for_step`` consults.  Fall back to a
+        # freshly-loaded ``Config`` (which reads the environment) when no
+        # explicit config is supplied so existing call sites keep working.
+        self.config = config or Config()
 
     async def chat(self, message: str) -> AsyncIterator[str]:
         """Simple chat interface for testing the model backend independently of the research process
@@ -40,104 +81,37 @@ class ResearchAgent:
             yield response_chunk
 
     def _select_model_for_step(self, step: ResearchStep | str) -> str:
-        """Select the appropriate model for a given research step based on its description and complexity"""
+        """Select the appropriate model for a given research step.
+
+        Delegates the actual backend → model-name lookup to
+        ``model_backend.select_model_for_backend`` so all agents agree on
+        which config field to consult.  Only the heavy/light *decision*
+        lives here — driven by keyword matching against the step
+        description.
+        """
         if isinstance(step, str):
             description = step.lower()
         else:
             description = step.description.lower()
 
-        # Use the most powerful model available for synthesis and insight generation
-        if any(
-            keyword in description
-            for keyword in [
-                "plan",
-                "synthesize",
-                "insight",
-                "pattern",
-                "analyze",
-                "summarize",
-                "research",
-                "develop",
-                "assess",
-                "assessment",
-                "recommendation",
-                "creative application",
-                "document",
-            ]
-        ):
-            if isinstance(self.model, OpenAIBackend):
-                return "gpt-5.2"
-            elif isinstance(self.model, AzureOpenAIBackend):
-                return "gpt-5.2"
-            elif isinstance(self.model, AWSOpenAIBackend):
-                return "global.anthropic.claude-sonnet-4-6"
-            elif isinstance(self.model, GCPVertexAIBackend):
-                return "gemini-2.5-pro"
-            elif isinstance(self.model, OllamaBackend):
-                return "nemotron-3-nano"
-            else:
-                raise ValueError(
-                    f"Unsupported model backend for synthesis steps: {type(self.model)}"
-                )
+        is_heavy = any(kw in description for kw in _HEAVY_KEYWORDS)
+        is_light = (not is_heavy) and any(kw in description for kw in _LIGHT_KEYWORDS)
 
-        # Use a more efficient model for information gathering and tool execution steps
-        elif any(
-            keyword in description
-            for keyword in [
-                "search",
-                "find",
-                "gather",
-                "execute",
-                "retrieve",
-                "scrape",
-                "follow links",
-            ]
-        ):
-            if isinstance(self.model, OpenAIBackend):
-                return "gpt-5-nano"
-            elif isinstance(self.model, AzureOpenAIBackend):
-                return "gpt-5-nano"
-            elif isinstance(self.model, AWSOpenAIBackend):
-                return "global.anthropic.claude-haiku-4-5-20251001-v1:0"
-            elif isinstance(self.model, GCPVertexAIBackend):
-                return "gemini-2.5-nano"
-            elif isinstance(self.model, OllamaBackend):
-                return "llama3.2"
-            else:
-                raise ValueError(
-                    f"Unsupported model backend for synthesis steps: {type(self.model)}"
-                )
+        # If nothing matched, default to the heavy model — historic behaviour
+        # (the previous implementation fell through to the heavy path for
+        # unmatched steps).
+        resolved_heavy = is_heavy or (not is_light)
 
-        # Pick a model for simple status messages or failure messages
-        elif any(
-            keyword in description
-            for keyword in ["status", "message", "failure", "error", "inform the user"]
-        ):
-            if isinstance(self.model, OpenAIBackend):
-                return "gpt-5-nano"
-            elif isinstance(self.model, AzureOpenAIBackend):
-                return "gpt-5-nano"
-            elif isinstance(self.model, AWSOpenAIBackend):
-                return "global.anthropic.claude-haiku-4-5-20251001-v1:0"
-            elif isinstance(self.model, GCPVertexAIBackend):
-                return "gemini-2.5-nano"
-            elif isinstance(self.model, OllamaBackend):
-                return "llama3.2"
-            else:
+        model = select_model_for_backend(
+            self.model, self.config, is_heavy=resolved_heavy
+        )
+        if model is None:
+            # Single-model backends (HuggingFace) or unrecognised types —
+            # fall back to whatever the backend was configured with.
+            fallback = getattr(self.model, "model", None)
+            if not fallback:
                 raise ValueError(
-                    f"Unsupported model backend for status/failure messages: {type(self.model)}"
+                    f"Unsupported model backend for model selection: {type(self.model)}"
                 )
-        # Default to the most powerful model for any steps that don't match specific keywords,
-        # as a safe fallback to ensure quality.
-        if isinstance(self.model, OpenAIBackend):
-            return "gpt-5.2"
-        elif isinstance(self.model, AzureOpenAIBackend):
-            return "gpt-5.2"
-        elif isinstance(self.model, AWSOpenAIBackend):
-            return "global.anthropic.claude-sonnet-4-6"
-        elif isinstance(self.model, GCPVertexAIBackend):
-            return "gemini-2.5-pro"
-        elif isinstance(self.model, OllamaBackend):
-            return "nemotron-3-nano"
-        else:
-            raise ValueError(f"Unsupported model backend: {type(self.model)}")
+            return fallback
+        return model

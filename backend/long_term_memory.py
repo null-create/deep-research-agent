@@ -2304,6 +2304,13 @@ class KnowledgeGraph:
         if relationships:
             parts.append("\nKNOWN RELATIONSHIPS:")
             seen_triples: Set[str] = set()
+            # Cap relationships surfaced in the LLM context.  A 5-entity /
+            # 2-hop traversal on a mature graph can easily return hundreds of
+            # edges; without a cap we blow the prompt budget and the model
+            # loses focus.  Callers who need the full set can call
+            # ``get_relationships`` directly.
+            _rel_cap = max(entity_limit * 6, 20)
+            _rel_count = 0
             for r in relationships:
                 # Filter by minimum confidence when specified
                 if min_confidence > 0.0 and r.get("confidence", 1.0) < min_confidence:
@@ -2316,6 +2323,12 @@ class KnowledgeGraph:
                 conf = r.get("confidence", 1.0)
                 conf_str = f" (conf: {conf:.2f})" if conf < 0.8 else ""
                 parts.append(f"  • {triple}{conf_str}")
+                _rel_count += 1
+                if _rel_count >= _rel_cap:
+                    parts.append(
+                        f"  … (+{len(relationships) - _rel_count} more relationships omitted)"
+                    )
+                    break
 
         # Claims
         if include_claims and entity_names:
@@ -2344,8 +2357,16 @@ class KnowledgeGraph:
 
         if communities:
             parts.append("\nTHEMATIC CLUSTERS:")
-            for c in communities:
+            # Cap at 5 clusters — the top ones by construction are the most
+            # relevant to the seed entities, and beyond that the summaries
+            # tend to duplicate content already in KNOWN ENTITIES.
+            _community_cap = 5
+            for c in communities[:_community_cap]:
                 parts.append(f"  [{c['topic']}] {c['summary']}")
+            if len(communities) > _community_cap:
+                parts.append(
+                    f"  … (+{len(communities) - _community_cap} more clusters omitted)"
+                )
 
         # Optional: contradictions
         if include_contradictions:

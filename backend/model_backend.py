@@ -965,3 +965,52 @@ def create_model_backend(config: Config) -> ModelBackend:
 
     else:
         raise ValueError(f"Unknown model backend: {backend_type}")
+
+
+# ── Shared model-selection helper ────────────────────────────────────────────
+#
+# Both ``Orchestrator._select_model`` and ``ResearchAgent._select_model_for_step``
+# need to pick a config-driven model name given a backend instance and a
+# heavy/light preference.  Keeping the mapping here avoids the two-implementation
+# drift that ``optimization.py`` inherited before (hardcoded strings that
+# fell out of sync with the ``*_HEAVY_MODEL`` / ``*_LIGHT_MODEL`` env vars).
+def select_model_for_backend(
+    backend: "ModelBackend",
+    config: Any,
+    *,
+    is_heavy: bool,
+) -> Optional[str]:
+    """Return the configured heavy/light model name for ``backend``.
+
+    Parameters
+    ----------
+    backend:
+        Live model backend instance (``OpenAIBackend`` / ``AWSOpenAIBackend`` /
+        etc.).  The concrete type picks which family of ``*_heavy_model`` /
+        ``*_light_model`` config fields to consult.
+    config:
+        A ``Config`` instance carrying the per-backend heavy/light fields.
+    is_heavy:
+        ``True`` → pick the heavy model, ``False`` → pick the light model.
+
+    Returns ``None`` for backends that only support a single model
+    (currently ``HuggingFaceBackend``); callers should fall back to the
+    backend's own default in that case.
+    """
+    if isinstance(backend, OpenAIBackend):
+        return config.openai_heavy_model if is_heavy else config.openai_light_model
+    if isinstance(backend, AzureOpenAIBackend):
+        return config.azure_heavy_model if is_heavy else config.azure_light_model
+    if isinstance(backend, AWSOpenAIBackend):
+        return config.aws_heavy_model if is_heavy else config.aws_light_model
+    if isinstance(backend, GCPVertexAIBackend):
+        return config.gcp_heavy_model if is_heavy else config.gcp_light_model
+    if isinstance(backend, OllamaBackend):
+        return config.ollama_heavy_model if is_heavy else config.ollama_light_model
+    if isinstance(backend, AnthropicBackend):
+        return (
+            config.anthropic_heavy_model if is_heavy else config.anthropic_light_model
+        )
+    if isinstance(backend, HuggingFaceBackend):
+        return None
+    return None

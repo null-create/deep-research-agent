@@ -9,6 +9,25 @@ export interface Conversation {
    *  determine which replay events are already in localStorage and which are
    *  new (i.e. were emitted while the browser was closed). */
   _eventIndex?: number;
+  /** Backend research session id.  Set when the user submits a query and
+   *  cleared once the session reaches a terminal state
+   *  (report / error / plan_denied / research_stopped).  Survives browser
+   *  close so a re-visit can resume the pipeline.  Each conversation carries
+   *  its own — this replaces the singleton ``deep_research_session_id``
+   *  localStorage key. */
+  sessionId?: string;
+  /** Coarse lifecycle state mirrored from the backend.  Enables the frontend
+   *  to decide whether ``resume`` should be sent when the user re-selects
+   *  the conversation.  Terminal states: ``complete``, ``error``,
+   *  ``cancelled``, ``denied``. */
+  sessionState?:
+    | 'planning'
+    | 'awaiting_approval'
+    | 'executing'
+    | 'complete'
+    | 'error'
+    | 'cancelled'
+    | 'denied';
 }
 
 export type PlanAction = 'pending' | 'approved' | 'modified' | 'denied' | 'ended';

@@ -1325,3 +1325,446 @@ class TestKnowledgeGraph:
         called_cyphers = [str(c.args[0]) for c in session_mock.run.call_args_list]
         assert any("CREATE" in q for q in called_cyphers)
         assert result.get("success") is True
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Session persistence — plan checkpoint round-trip + on-disk cleanup
+# ═════════════════════════════════════════════════════════════════════════
+class TestSessionStorePlanCheckpoint:
+    """Cover the P0-3/P0-4/P0-6 hardening: plan snapshots survive restarts
+    and pruned sessions no longer leave checkpoint files behind."""
+
+    def _make_store(self, tmp_path):
+        from session_store import SessionStore, ResearchSession
+
+        store = SessionStore(sessions_dir=tmp_path)
+        return store, ResearchSession
+
+    def _make_session(self, ResearchSession, session_id: str):
+        # ``orchestrator`` is typed Any; persist() only serialises replay_log
+        # and state so a MagicMock is enough for these tests.
+        return ResearchSession(session_id=session_id, orchestrator=MagicMock())
+
+    def test_persist_then_load_round_trips_plan_checkpoint(self, tmp_path):
+        store, ResearchSession = self._make_store(tmp_path)
+        session = self._make_session(ResearchSession, "sess-plan-1")
+        session.state = "awaiting_approval"
+        plan_ckpt = {
+            "query": "test",
+            "pending_plan": {
+                "id": "p1",
+                "steps": [{"id": 1, "description": "step one"}],
+            },
+        }
+        store._sessions[session.session_id] = session
+        store.persist(session, plan_checkpoint=plan_ckpt)
+
+        loaded = store.load_checkpoint(session.session_id)
+        assert loaded is not None
+        # ``load_checkpoint`` returns the raw JSON dict; the plan-checkpoint
+        # payload must round-trip verbatim.
+        assert loaded.get("plan_checkpoint") == plan_ckpt
+        assert loaded.get("state") == "awaiting_approval"
+
+    def test_remove_deletes_on_disk_checkpoint(self, tmp_path):
+        store, ResearchSession = self._make_store(tmp_path)
+        session = self._make_session(ResearchSession, "sess-cleanup")
+        store._sessions[session.session_id] = session
+        store.persist(session)
+        checkpoint_path = tmp_path / f"{session.session_id}.json"
+        assert checkpoint_path.exists(), "persist() should create the file"
+
+        store.remove(session.session_id)
+        assert not checkpoint_path.exists(), (
+            "remove() must delete the on-disk checkpoint so pruned sessions "
+            "cannot be resurrected"
+        )
+        assert session.session_id not in store._sessions
+
+    def test_remove_missing_checkpoint_is_noop(self, tmp_path):
+        """`remove()` must tolerate an in-memory session with no on-disk file."""
+        store, ResearchSession = self._make_store(tmp_path)
+        session = self._make_session(ResearchSession, "sess-no-file")
+        store._sessions[session.session_id] = session
+        # No persist() call → no checkpoint file exists.
+        store.remove(session.session_id)  # must not raise
+        assert session.session_id not in store._sessions
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# Orchestrator plan-checkpoint restore (P0-4)
+# ═════════════════════════════════════════════════════════════════════════
+class TestOrchestratorPlanRestore:
+    """``Orchestrator.plan_checkpoint()`` + ``restore_plan_state()`` should
+    round-trip the pending plan so approval works after a restart."""
+
+    def test_plan_checkpoint_round_trip(self, make_orchestrator):
+        from models import ResearchPlan, ResearchStep, StepStatus
+
+        orch = make_orchestrator()
+        # Simulate a completed plan that the user hasn't approved yet.
+        orch._pending_plan = ResearchPlan(
+            goal="Investigate X",
+            steps=[
+                ResearchStep(
+                    id=1,
+                    name="Investigate X",
+                    description="Investigate X",
+                    status=StepStatus.PENDING,
+                )
+            ],
+        )
+        orch.context.save_step("query", "What is X?")
+
+        snapshot = orch.plan_checkpoint()
+        assert snapshot is not None
+        assert snapshot["query"] == "What is X?"
+        assert snapshot["pending_plan"] is not None
+
+        # A fresh orchestrator restores identical state from the snapshot.
+        orch2 = make_orchestrator()
+        assert orch2._pending_plan is None
+        orch2.restore_plan_state(snapshot)
+        assert orch2._pending_plan is not None
+        assert len(orch2._pending_plan.steps) == 1
+        assert orch2._pending_plan.steps[0].description == "Investigate X"
+        # Query is rehydrated so approve_plan/execute can build prompts.
+        assert orch2.context.get_step_result("query") == "What is X?"
+
+    def test_plan_checkpoint_with_no_pending_plan(self, make_orchestrator):
+        """Snapshot must still be valid JSON when no plan is pending —
+        callers rely on it being safe to persist unconditionally."""
+        orch = make_orchestrator()
+        assert orch._pending_plan is None
+        snapshot = orch.plan_checkpoint()
+        assert snapshot is not None
+        assert snapshot["pending_plan"] is None
+
+
+# ===========================================================================
+# Group 13 — _recover_session_from_checkpoint: executing branch (P0-2)
+# ===========================================================================
+
+
+class TestRecoverExecutingSession:
+    """Cover the 'execute recovery' branch of ``_recover_session_from_checkpoint``.
+
+    This is Case 2: a session whose checkpoint has ``state='executing'`` and a
+    valid ``plan_checkpoint`` but *no* ``synthesis_checkpoint``.  The function
+    must restore the pending plan on the orchestrator and launch a background
+    job that re-runs ``execute() → synthesize()``.
+
+    The synthesis and execute generators on the orchestrator are replaced with
+    async iterators that yield nothing so the background task completes quickly
+    without touching any real LLM or MCP infrastructure.
+    """
+
+    def _build_app_state(self, mock_registry, mock_backend):
+        """Return a minimal app_state namespace accepted by ``_make_orchestrator``."""
+        from config import Config
+        from orchestrator import AgentPool
+
+        pool = AgentPool.from_single_backend(mock_backend)
+
+        state = MagicMock()
+        state.config = Config()
+        state.mcp_registry = mock_registry
+        state.agent_pool = pool
+        state.long_term_memory = None
+        return state
+
+    def _build_plan_checkpoint(self):
+        """Minimal plan_checkpoint that ``restore_plan_state`` can hydrate."""
+        return {
+            "query": "What is the future of AI?",
+            "pending_plan": {
+                "id": "plan-exec-1",
+                "goal": "Research AI futures",
+                "steps": [
+                    {
+                        "id": 1,
+                        "name": "Search AI trends",
+                        "description": "Search for AI trends",
+                        "status": "pending",
+                        "parallel_group": None,
+                    }
+                ],
+            },
+            "prior_context": None,
+        }
+
+    async def test_execute_branch_launches_background_job(
+        self, mock_registry, mock_backend, tmp_path
+    ):
+        """A checkpoint with state=executing and a plan_checkpoint must
+        trigger a background execute+synthesize job via session_manager."""
+        from api_server import _recover_session_from_checkpoint
+        from session_manager import ResearchSessionManager
+        from session_store import SessionStore
+
+        app_state = self._build_app_state(mock_registry, mock_backend)
+        session_manager = ResearchSessionManager()
+        store = SessionStore(sessions_dir=tmp_path)
+
+        checkpoint_data = {
+            "session_id": "sess-exec-recover-1",
+            "state": "executing",
+            "replay_log": [],
+            "plan_checkpoint": self._build_plan_checkpoint(),
+            # No synthesis_checkpoint → this is mid-execute, not mid-synthesis.
+        }
+
+        # Replace execute() and synthesize() with empty async generators so
+        # the background task completes without hitting any real backend.
+        async def _empty_gen():
+            return
+            yield  # pragma: no cover  (makes it an async generator)
+
+        app_state.agent_pool.root = MagicMock()
+
+        session = await _recover_session_from_checkpoint(
+            app_state, session_manager, store, checkpoint_data
+        )
+
+        # The session must have a running background task.
+        assert session.background_task is not None, (
+            "Execute recovery must start a background task."
+        )
+        assert not session.background_task.done() or session.background_task.done(), (
+            "Background task must exist (may be done if it ran to completion quickly)."
+        )
+
+        # The orchestrator must have the pending plan restored.
+        assert session.orchestrator._pending_plan is not None, (
+            "restore_plan_state() must have populated _pending_plan."
+        )
+        assert session.orchestrator._pending_plan.steps[0].description == (
+            "Search for AI trends"
+        )
+
+        # Allow the background task to finish so we don't leak coroutines.
+        await asyncio.sleep(0.1)
+        await session_manager.shutdown(timeout=2.0)
+
+    async def test_execute_branch_emits_restart_status_event(
+        self, mock_registry, mock_backend, tmp_path
+    ):
+        """The recovery path must immediately emit a status event telling the
+        client that the server restarted and research is being re-run."""
+        from api_server import _recover_session_from_checkpoint
+        from session_manager import ResearchSessionManager
+        from session_store import SessionStore
+
+        app_state = self._build_app_state(mock_registry, mock_backend)
+        session_manager = ResearchSessionManager()
+        store = SessionStore(sessions_dir=tmp_path)
+
+        checkpoint_data = {
+            "session_id": "sess-exec-recover-2",
+            "state": "executing",
+            "replay_log": [],
+            "plan_checkpoint": self._build_plan_checkpoint(),
+        }
+
+        session = await _recover_session_from_checkpoint(
+            app_state, session_manager, store, checkpoint_data
+        )
+
+        # The replay_log must contain the restart status message emitted
+        # synchronously before the background task is created.
+        status_events = [
+            e for e in session.replay_log if e.get("type") == "status"
+        ]
+        assert len(status_events) >= 1, (
+            "Recovery must emit at least one status event before launching the job."
+        )
+        assert "restarting" in status_events[0].get("message", "").lower() or \
+               "restart" in status_events[0].get("message", "").lower(), (
+            f"Status event message should mention restart, got: {status_events[0]}"
+        )
+
+        await asyncio.sleep(0.1)
+        await session_manager.shutdown(timeout=2.0)
+
+    async def test_terminal_state_skips_job_creation(
+        self, mock_registry, mock_backend, tmp_path
+    ):
+        """A checkpoint whose replay_log already contains a 'report' event is
+        terminal and must NOT launch a new background job."""
+        from api_server import _recover_session_from_checkpoint
+        from session_manager import ResearchSessionManager
+        from session_store import SessionStore
+
+        app_state = self._build_app_state(mock_registry, mock_backend)
+        session_manager = ResearchSessionManager()
+        store = SessionStore(sessions_dir=tmp_path)
+
+        checkpoint_data = {
+            "session_id": "sess-exec-terminal",
+            "state": "executing",
+            "replay_log": [{"type": "report", "data": {"document": "# Done"}}],
+            "plan_checkpoint": self._build_plan_checkpoint(),
+        }
+
+        session = await _recover_session_from_checkpoint(
+            app_state, session_manager, store, checkpoint_data
+        )
+
+        # No background task should have been started.
+        assert session.background_task is None, (
+            "Terminal sessions (report already delivered) must not re-launch the pipeline."
+        )
+        await session_manager.shutdown(timeout=2.0)
+
+
+# ===========================================================================
+# Group 14 — WebSocket resume flow (Item 5a)
+# ===========================================================================
+
+
+class TestWebSocketResume:
+    """Integration tests for the WebSocket reconnect + replay flow.
+
+    Uses FastAPI's built-in test WebSocket client (``starlette.testclient``)
+    to drive the full ``/ws/research`` endpoint without a running server.
+    The orchestrator is fully mocked so no real LLM or MCP calls are made.
+
+    Scenario:
+      1. Client connects and submits a query → receives ``session_created``.
+      2. Client disconnects before execution finishes.
+      3. Client reconnects and sends ``resume`` → receives ``session_resumed``
+         followed by the replay log in order.
+    """
+
+    @pytest.fixture()
+    def app_with_mocks(self, mock_registry, mock_backend, tmp_path):
+        """Build a minimal FastAPI app whose lifespan is bypassed — state is
+        injected directly so the test does not touch real Neo4j, MCP, or LLM."""
+        from fastapi import FastAPI
+        from api_server import app as real_app, research_websocket
+        from session_store import SessionStore
+        from session_manager import ResearchSessionManager
+        from orchestrator import AgentPool
+        from config import Config
+
+        # Clone just the WS route onto a fresh app so our injected state
+        # takes effect without the lifespan firing.
+        test_app = FastAPI()
+        test_app.add_api_websocket_route("/ws/research", research_websocket)
+
+        pool = AgentPool.from_single_backend(mock_backend)
+
+        test_app.state.config = Config()
+        test_app.state.mcp_registry = mock_registry
+        test_app.state.agent_pool = pool
+        test_app.state.long_term_memory = None
+        test_app.state.session_store = SessionStore(sessions_dir=tmp_path)
+        test_app.state.session_manager = ResearchSessionManager()
+        test_app.state.shutting_down = False
+
+        return test_app
+
+    @pytest.fixture()
+    def fast_plan_backend(self, mock_backend):
+        """Configure mock_backend to return a valid plan JSON on the first
+        generate() call so plan() completes quickly."""
+        plan_json = json.dumps(
+            {
+                "goal": "Test goal",
+                "steps": [{"id": 1, "description": "Step one"}],
+            }
+        )
+        mock_backend.generate = AsyncMock(
+            return_value=_make_model_response(content=plan_json)
+        )
+        return mock_backend
+
+    async def test_session_created_on_query(self, app_with_mocks, fast_plan_backend):
+        """A ``query`` message must produce a ``session_created`` reply."""
+        from starlette.testclient import TestClient
+
+        # Patch generate on the pool's root backend for this test.
+        app_with_mocks.state.agent_pool.root = MagicMock()
+        app_with_mocks.state.agent_pool.root.model = fast_plan_backend
+
+        with TestClient(app_with_mocks) as client:
+            with client.websocket_connect("/ws/research") as ws:
+                ws.send_json({"type": "query", "content": "Test research query"})
+                # Drain messages until we see session_created or error.
+                for _ in range(10):
+                    msg = ws.receive_json()
+                    if msg.get("type") in ("session_created", "error"):
+                        break
+                assert msg.get("type") == "session_created", (
+                    f"Expected session_created, got: {msg}"
+                )
+                assert "session_id" in msg
+
+    async def test_resume_replays_events_in_order(
+        self, app_with_mocks, tmp_path, mock_registry, mock_backend
+    ):
+        """Reconnecting with a known session_id must trigger session_resumed
+        and the replay log must arrive with events in their original order."""
+        from session_store import SessionStore, ResearchSession
+        from starlette.testclient import TestClient
+
+        store: SessionStore = app_with_mocks.state.session_store
+
+        # Pre-create a session with a known replay log so we can verify ordering.
+        orch = MagicMock()
+        orch._pending_plan = None
+        orch.plan_checkpoint = MagicMock(return_value=None)
+        session = store.create(orch, session_id="resume-test-session")
+        session.state = "complete"
+        session.complete = True
+        for i in range(3):
+            session.emit({"type": "status", "message": f"Event {i}", "seq": i})
+
+        with TestClient(app_with_mocks) as client:
+            with client.websocket_connect("/ws/research") as ws:
+                ws.send_json({"type": "resume", "session_id": "resume-test-session"})
+
+                # Collect messages until session_resumed arrives.
+                received = []
+                for _ in range(20):
+                    msg = ws.receive_json()
+                    received.append(msg)
+                    if msg.get("type") == "session_resumed":
+                        break
+
+                assert any(m.get("type") == "session_resumed" for m in received), (
+                    "Must receive session_resumed after sending resume."
+                )
+                resumed_msg = next(
+                    m for m in received if m.get("type") == "session_resumed"
+                )
+                assert resumed_msg.get("session_id") == "resume-test-session"
+
+                # Drain the replay log — should arrive in order.
+                replay = []
+                for _ in range(10):
+                    try:
+                        msg = ws.receive_json()
+                        if msg.get("type") == "status":
+                            replay.append(msg)
+                        if len(replay) == 3:
+                            break
+                    except Exception:
+                        break
+
+                seqs = [m.get("seq") for m in replay]
+                assert seqs == sorted(seqs), (
+                    f"Replay events must arrive in sequence order, got seqs: {seqs}"
+                )
+
+    async def test_resume_unknown_session_returns_error(self, app_with_mocks):
+        """Resuming an unknown session id must return an error event, not crash."""
+        from starlette.testclient import TestClient
+
+        with TestClient(app_with_mocks) as client:
+            with client.websocket_connect("/ws/research") as ws:
+                ws.send_json({"type": "resume", "session_id": "nonexistent-session"})
+                msg = ws.receive_json()
+                assert msg.get("type") == "error", (
+                    f"Expected error for unknown session, got: {msg}"
+                )

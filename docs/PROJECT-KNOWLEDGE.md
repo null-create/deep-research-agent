@@ -1,13 +1,87 @@
 # PROJECT-KNOWLEDGE.md — Research Assistant
 
 > Living architecture map. Load fully at session start. Update surgically when things change.
+> Updated: 2026-09-29 — DEFERRED.md follow-ups (partial close-out):
+>   • **Dead files** — `src/components/MCPServerManger.tsx`, `src/components/MCPServerManager.tsx`,
+>     `src/components/ReportViewer.tsx`, `backend/metrics.py` confirmed dead on disk, awaiting
+>     manual `rm` by operator (agent shell blocks `rm`).
+>     See DEFERRED.md §1 for the exact `rm` command.
+>   • **PROJECT-KNOWLEDGE.md accuracy** — corrected three wrong claims: (a) 2026-03-18 entry
+>     no longer claims `ReportViewer.tsx` was deleted (it wasn't); (b) `MCPServerManger.tsx`
+>     component table entry now correctly marked as dead; (c) `metrics.py` table entry now
+>     correctly marked as dead.
+>   • **Item 5b / TestRecoverExecutingSession** — three new tests added to
+>     `backend/unit_tests.py` covering the `state=executing` recovery branch of
+>     `_recover_session_from_checkpoint` (Case 2: mid-execute crash, no synthesis checkpoint).
+>     All 148 unit tests pass.
+>   • **Item 5a / TestWebSocketResume** — three new integration tests added to
+>     `backend/unit_tests.py` using Starlette's `TestClient` WebSocket transport.
+>     Covers: session_created on query, replay ordering on resume, error on unknown session.
+>   • **Item 5c / App.multisession.test.tsx** — new `src/components/__tests__/` directory
+>     created. Three vitest tests cover multi-session routing: (1) events for session A update
+>     conv A even when conv B is active; (2) background session events persist correctly for
+>     future re-activation; (3) `session_created` binds to originating conv via
+>     `pendingQueryConvIdRef`. All 3 pass.
+>   • **Test infra** — `vitest` upgraded from 1.0.4 → 3.x, `@testing-library/react`,
+>     `@testing-library/jest-dom`, `@testing-library/dom`, `jsdom` added as dev deps.
+>     `src/vitest.config.ts` created (separate from `vite.config.ts` to avoid vite 7 ESM
+>     incompatibility with vitest's internal bundler). `src/test-setup.ts` created.
+>   • **DEFERRED.md items 2, 3, 6, 7** — not yet implemented (item 3 already closed;
+>     items 2/7 need benchmark/log data; item 6 is optional).
+> Updated: 2026-09-29 — Session recovery + multi-session frontend hardening (P0/P1/P2 sweep):
+>   • **P0-1** `App.tsx` now tracks sessions per-conversation instead of via two
+>     global refs / localStorage keys.  Each `Conversation` carries its own
+>     `sessionId` / `sessionState` metadata; the frontend can resume any
+>     conversation whose session is still executing rather than only the last one.
+>   • **P0-2** `_recover_session_from_checkpoint()` in `api_server.py` now
+>     re-launches the full pipeline (plan → execute → synthesize) when a
+>     checkpoint is found in `executing` state without a `synthesis_checkpoint` —
+>     previously such sessions silently dropped and could not be resumed.
+>   • **P0-3** Sessions are persisted once `plan()` completes (state
+>     `awaiting_approval`) so a restart between plan and approval no longer
+>     loses the pending plan.
+>   • **P0-4** `Orchestrator.plan_checkpoint()` / `restore_plan()` serialise
+>     `_pending_plan` + `_prior_context` + `_current_query`; recovery
+>     rehydrates them so plan approval works after a restart.
+>   • **P0-5** `plan()` transitions state to `awaiting_approval` **before**
+>     yielding the `plan` event so a client disconnect between yield and
+>     persistence can't wedge the session in `planning`.
+>   • **P0-6** `SessionStore.remove()` now also deletes the on-disk
+>     checkpoint file so terminated sessions can't be resurrected.
+>   • **P1-1** `research_agent._select_model_for_step()` now delegates to
+>     `model_backend.select_model_for_backend()` (shared with
+>     `Orchestrator._select_model`) and consults the config's
+>     `*_heavy_model` / `*_light_model` fields instead of hardcoded strings.
+>     `SelfOptimizingAgent.__init__` accepts an optional `config`.
+>   • **P1-3** `_run_search` streams `[Search] iteration N/M` status events
+>     live via an `asyncio.Queue`, not batched after completion.
+>   • **P1-4** `/project-docs` endpoint resolves the docs dir in this order:
+>     `DOCS_DIR` env → `backend/docs` → repo-root `docs/`.  Fixes 404s when
+>     running the API server outside Docker.
+>   • **P1-5** Removed the legacy `ConfigUpdate.model` field (dead — the UI
+>     only sends `heavy_model` / `light_model`).
+>   • **P1-6** Report synthesis pre-batches every section's RAG query
+>     embedding via `SearchResultStore.warm_query_cache()` before section
+>     drafting starts (one round-trip instead of N).
+>   • **P2-2** `KnowledgeGraph.recall_graph_context()` caps relationships
+>     (`entity_limit * 6`, min 20) and communities (5) in the LLM context.
+>   • **P2-4** `filter_long_term_memories` docstring corrected — it is
+>     TF-IDF, not embedding-based cosine.
+>   • **P2-5** `synthesize()` logs when the analyst-fallback truncation
+>     drops content (>6000 chars).
+>
+> Known dead files still on disk (couldn't be `rm`-ed by the agent):
+>   `src/components/MCPServerManger.tsx` (typo), `src/components/MCPServerManager.tsx`,
+>   `src/components/ReportViewer.tsx`, `backend/metrics.py`.
+>
 > Updated: 2026-04-10 — Pipeline data-flow audit: 9 fixes to ensure comprehensive data passage between agents. Config defaults: `max_iterations` 3→5, `distill_max_chars` 2000→4000, `step_summary_max_chars` 800→1500, `section_draft_top_k` 6→10, `analyst_top_k` 8→10. `_extract_sources()` converted from `@staticmethod` to instance method; now collects source URLs from RAG store chunks as fallback (8-session bug fixed). `_run_analyst()` now passes prior step structured claims/tensions to each analyst via `prior_claims_block` (cross-step `top_k` 3→5). `synthesize()` Phase B now passes `structured_claims_block`, `structured_tensions_block`, and `unresolved_contradictions_block` to section drafting; system prompt updated for novel insight generation. `_generate_step_summary` uses expanded input (claims[:15], tensions[:5], notes[:500]) and 8-bullet prompt. Distillation raw text input 8000→12000. Smoke tests: 62 total.
 > Updated: 2026-04-10 — Knowledge Graph Phase 1–5 (graph pruning + full enhancement): `long_term_memory.py` gained `Source` node type (uniqueness constraint on `url`), temporal props on Entity/RELATES_TO, relationship deduplication in `store_relationship`, 13 new KG methods (store_hierarchy, store_contradiction, find_contradictions, store_source, link_to_source, get_provenance, recent_entities, recent_relationships, session_diff, find_paths, find_common_neighbors, decay_confidence, prune), enhanced `recall_graph_context` (min_confidence, include_contradictions, include_provenance), expanded `stats()` (6 keys). `orchestrator.py`: mutation counter, dynamic entity_limit, enriched extraction prompt with IS_A+provenance wiring, smart community gate, post-synthesis decay. `config.py`: `confidence_decay_half_life` (default 30) + `graph_community_min_mutations` (default 3). `api_server.py`: 9 new `/graph/*` endpoints (POST /graph/prune + 8 GETs). Smoke tests: 57 total (was 48), all pass.
 > Updated: 2026-03-25 — Synthesis step leak fix: `_root_system_prompt()` updated with `CRITICAL CONSTRAINT` prohibiting synthesis steps in the plan. `_is_synthesis_step(step)` static method added (19-phrase detection). `_run_step()` gains a synthesis guard that skips steps matching the detector, emitting `step_complete` with `skipped_synthesis: True`. `App.tsx` `step_complete` handler shows a skip message rather than "Completed step" for skipped synthesis steps. Smoke tests: 47 total.
 > Updated: 2026-04-01 — ChromaDB → Neo4j migration: `long_term_memory.py` fully rewritten to use Neo4j async driver (`AsyncGraphDatabase`). Entities, relationships, and communities are now native Neo4j graph primitives (`:Entity`, `:RELATES_TO`, `:Community`, `:MEMBER_OF`). Flat memories stored as `:Memory` nodes with vector indexes (`memory_embedding_idx`, `entity_embedding_idx`, `community_embedding_idx`). `_NoOpEmbeddingFunction` deleted. `config.py` replaces `chroma_persist_dir`/`chroma_collection_name` with `neo4j_uri`/`neo4j_user`/`neo4j_password`/`neo4j_database`/`neo4j_embedding_dimensions`. `requirements.txt`: `chromadb` → `neo4j>=5.26.0`. Docker Compose adds `neo4j:5.26-community` service (ports 7474/7687, `neo4j_data` volume). `api_server.py` and `cli.py` updated with new constructor args + `close()` on shutdown. `smoke_test.py` updated. Migration script: `scripts/migrate_chroma_to_neo4j.py`.
 > Last verified: 2026-03-17 — E2E CONFIRMED WORKING (test_e2e.py + deployed Docker stack)
 > Updated: 2026-03-18 — Azure Container Apps Terraform updated: `mcp_memory` Container App removed; ChromaDB volume now mounted on backend; `MEMORY_SERVER_URL` env var removed from backend; `CHROMA_PERSIST_DIR` + `CHROMA_COLLECTION_NAME` added.
-> Updated: 2026-03-18 — Frontend dead code removed: `ReasearchProgress.tsx`, `StepResultModel.tsx`, `StatusIndicator.tsx`, `LoadingSpinner.tsx`, `ReportViewer.tsx`, `hooks/useGraphState.ts`.
+> Updated: 2026-03-18 — Frontend dead code removed: `ReasearchProgress.tsx`, `StepResultModel.tsx`, `StatusIndicator.tsx`, `LoadingSpinner.tsx`, `hooks/useGraphState.ts`.
+> NOTE: `ReportViewer.tsx` was **not** removed on this date despite what this entry originally said. It is still present on disk as of the 2026-09-29 audit (see "Known dead files still on disk" note above).
 > Updated: 2026-03-19 — Self-optimize pipeline fixed: `SelfOptimizingAgent` now accepts `AsyncLongTermMemory` and calls `.recall()` directly; `backend/instructions/` bind-mounted in both docker-compose files.
 > Updated: 2026-03-19 — File upload architecture: frontend uploads directly to file handler MCP (port 9191) via custom HTTP routes; nginx + vite proxy `/files/*` to it. Orchestrator.plan() now reads uploaded files via MCP and injects context into planning prompt.
 > Updated: 2026-03-20 — GraphRAG: `KnowledgeGraph` class added to `long_term_memory.py` with 3 new ChromaDB collections (entities, relationships, communities). Orchestrator extracts triples from analyst claims, recalls graph context during planning, updates communities post-synthesis.
@@ -72,7 +146,8 @@ research-assistant/
 | `report_exporter.py` | PDF export: `export_report_pdf(doc, query, session_id)` async entry point. `_generate_pdf()` via `asyncio.to_thread` using `fpdf2`. `REPORTS_DIR` env var (default `<repo_root>/data/reports`). Called by `orchestrator.synthesize()` before yielding `report` event. |
 | `env.py` | Read/write `.env` file values programmatically (preserves formatting) |
 | `error_handling.py` | Shared error handling utilities |
-| `metrics.py` / `observability.py` / `monitoring.py` | Logging and observability helpers |
+| `metrics.py` | **Dead file — awaiting `rm`.** Only imports itself; superseded entirely by `observability.py` and `monitoring.py`. Do not add new imports to this file. |
+| `observability.py` / `monitoring.py` | Logging and observability helpers (the live paths) |
 | `pipeline.py` | Semaphore-capped pipeline runner with query dedup |
 | `cli.py` | Command-line interface for running research without the frontend |
 | `test_e2e.py` | Quick E2E smoke test: mock MCP registry + real LLM backend. Runs full plan→execute→synthesize flow. No API server needed. Run from `backend/` dir as `python test_e2e.py`. |
@@ -102,7 +177,8 @@ research-assistant/
 | `Sidebar.tsx` | Conversation history list |
 | `StepResultViewer.tsx` | Per-step result viewer (collapsible inline) |
 | `ProgressSpinner.tsx` | Loading spinner (active; `LoadingSpinner.tsx` was removed) |
-| `MCPServerManger.tsx` | MCP server status/management UI — shows all servers (builtins + user-added), transport badge, tools count, lock icon for builtins, delete for user-added servers; transport selector (Streamable HTTP / SSE / stdio) with context-aware form fields in add form |
+| `MCPServerManger.tsx` | **Dead file — awaiting `rm`.** Typo of `MCPServerManager`. Never imported anywhere. |
+| `MCPServerManager.tsx` | **Dead file — awaiting `rm`.** Correct spelling but also never imported. MCP server UI is inlined in `Sidebar.tsx`. |
 | `DocsViewer.tsx` | Full-screen modal overlay: left sidebar lists all `docs/*.md` files (auto-loaded on open, auto-selects first), right pane renders selected doc as markdown using `react-markdown` + `remark-gfm` + Tailwind `prose`. Closes on Escape or backdrop click. Opened by "Docs" button in `App.tsx` top nav bar. |
 
 ### Key Hooks (`src/hooks/`)

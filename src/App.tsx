@@ -15,10 +15,6 @@ import { apiClient } from './api/client';
 
 const WS_URL = import.meta.env.VITE_WS_URL || `${location.protocol.replace('http', 'ws')}//${location.host}/ws/research`;
 
-// localStorage keys — survive browser close so the session can be resumed.
-const LS_SESSION_ID = 'deep_research_session_id';
-const LS_CONV_ID = 'deep_research_conv_id';
-
 /**
  * crypto.randomUUID() requires a secure context (https or localhost).
  * Fall back to a simple pseudo-random id on plain http (e.g. LAN dev).
@@ -51,16 +47,27 @@ const AppContent: React.FC = () => {
     setPlanStatus,
     setEventIndex,
     getEventIndex,
+    setSessionId,
+    setSessionState,
+    findConvBySessionId,
+    onActivateSession,
   } = useApp();
 
   const [inputMode, setInputMode] = useState<'research' | 'chat'>('research');
-  // Tracks which conversation owns the currently running research session.
-  // Pre-populated from localStorage so a page refresh (or browser re-open)
-  // can resume seamlessly.
-  const researchConvIdRef = useRef<string | null>(localStorage.getItem(LS_CONV_ID));
-  // Tracks the active backend session_id so we can resume after a disconnect.
-  // Pre-populated from localStorage so it survives browser close.
-  const activeSessionIdRef = useRef<string | null>(localStorage.getItem(LS_SESSION_ID));
+  // P0-1: session state lives on the ``Conversation`` record itself (see
+  // ``types/conversation.ts``).  Two refs track transient state while events
+  // are being routed.
+  //
+  // ``pendingQueryConvIdRef`` — the conversation whose ``query`` was just
+  //   sent.  The next ``session_created`` reply is bound to this conv so
+  //   its ``sessionId`` is set correctly.  Cleared once bound.
+  //
+  // ``currentSessionIdRef`` — the session whose events are currently
+  //   flowing over this WebSocket.  Set by ``session_created`` and
+  //   ``session_resumed`` handlers.  Every non-control event is routed to
+  //   whichever conversation carries this session id.
+  const pendingQueryConvIdRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
   // Counts how many replay events are still outstanding after a resume.
   // addMessageToConv calls are suppressed while this is > 0 to prevent
   // duplicating messages already persisted in localStorage conversation history.
@@ -124,25 +131,44 @@ const AppContent: React.FC = () => {
   // disconnect.  If a session was active we ask the backend to resume it so
   // the user picks up exactly where they left off.
   const handleReconnected = useCallback(() => {
-    const sessionId = activeSessionIdRef.current;
+    const sessionId = currentSessionIdRef.current;
     if (!sessionId) return;
     console.log('[ws] Re-connected — resuming session', sessionId);
     sendMessageRef.current?.({ type: 'resume', session_id: sessionId });
   }, []);
 
-  // Called by useWebSocket on the very first connection (i.e. page load / hard
-  // refresh).  If a session_id was persisted from before the refresh we ask
-  // the backend to resume it, which causes the full replay log to be streamed
-  // back so the UI can restore its live state.
+  // Called by useWebSocket on the very first connection (i.e. page load /
+  // hard refresh).  Look at the active conversation and, if it has a live
+  // backend session persisted from before the refresh, resume it.
   const handleInitialConnect = useCallback(() => {
-    const sessionId = localStorage.getItem(LS_SESSION_ID);
-    if (!sessionId) return;
-    console.log('[ws] Initial connect — resuming stored session', sessionId);
-    sendMessageRef.current?.({ type: 'resume', session_id: sessionId });
+    // Find the most recently updated conversation that still has a live
+    // sessionId — this covers both the "user hard-refreshed while research
+    // was running" case and the "user closed the tab" case.
+    const liveStates = new Set(['planning', 'awaiting_approval', 'executing']);
+    // Fall back to any conv with a sessionId if none have an explicit
+    // live state (e.g. an old cache that predates the sessionState field).
+    const sorted = [...conversationsRef.current].sort(
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+    );
+    const target =
+      sorted.find((c) => c.sessionId && liveStates.has(c.sessionState ?? '')) ??
+      sorted.find((c) => c.sessionId);
+    if (!target?.sessionId) return;
+    console.log('[ws] Initial connect — resuming stored session', target.sessionId);
+    currentSessionIdRef.current = target.sessionId;
+    sendMessageRef.current?.({ type: 'resume', session_id: target.sessionId });
   }, []);
 
   // Needed so handleReconnected can call sendMessage before it's assigned.
   const sendMessageRef = useRef<((msg: any) => void) | null>(null);
+
+  // Ref mirror of ``conversations`` so ``handleInitialConnect`` (called
+  // once, before the first render commits) can look at the latest list
+  // without being re-created on every conversations change.
+  const conversationsRef = useRef(conversations);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   const {
     isConnected,
@@ -158,6 +184,20 @@ const AppContent: React.FC = () => {
   useEffect(() => {
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
+
+  // Register the session-activation bridge for ``selectConversation`` (see
+  // AppContext).  When the user picks a conversation with a live session,
+  // this fires a ``resume`` message so the backend switches its drain over.
+  useEffect(() => {
+    onActivateSession.current = (sessionId: string) => {
+      if (currentSessionIdRef.current === sessionId) return;
+      currentSessionIdRef.current = sessionId;
+      sendMessage({ type: 'resume', session_id: sessionId });
+    };
+    return () => {
+      onActivateSession.current = null;
+    };
+  }, [sendMessage, onActivateSession]);
 
   // ── Research control (pause / resume / stop) ─────────────────────────────
   const {
@@ -200,6 +240,15 @@ const AppContent: React.FC = () => {
       return;
     }
 
+    // Resolve which conversation owns the session these events belong to.
+    // Everything after ``session_created`` / ``session_resumed`` is routed
+    // by matching ``currentSessionIdRef`` against the per-conversation
+    // ``sessionId`` field.  ``owningConvId`` may be ``null`` when the very
+    // first control event arrives (before we've bound the session to a
+    // conversation) — the switch statement handles that explicitly.
+    const activeSid = currentSessionIdRef.current;
+    const owningConvId = activeSid ? findConvBySessionId(activeSid) : null;
+
     // Track event index: every non-control event from the backend
     // (whether from the initial stream or from a replay drain) counts
     // as one event.  We use this to know how many events are already
@@ -225,40 +274,51 @@ const AppContent: React.FC = () => {
 
     switch (type) {
       // ── Session lifecycle ──────────────────────────────────────────────
-      case 'session_created':
-        // Store the session_id + conv_id in localStorage so we can send a
-        // resume message on reconnect, hard refresh, or even browser re-open.
-        activeSessionIdRef.current = rawMessage.session_id ?? null;
-        if (rawMessage.session_id) {
-          localStorage.setItem(LS_SESSION_ID, rawMessage.session_id);
+      case 'session_created': {
+        // Bind the freshly-created backend session to whichever conversation
+        // just issued the ``query`` (tracked in ``pendingQueryConvIdRef``).
+        const sid = rawMessage.session_id as string | undefined;
+        const convId = pendingQueryConvIdRef.current;
+        pendingQueryConvIdRef.current = null;
+        if (sid && convId) {
+          currentSessionIdRef.current = sid;
+          setSessionId(convId, sid);
+          setSessionState(convId, 'planning');
+          activeEventIndexRef.current = 0;
+          setEventIndex(convId, 0);
+          console.log('[ws] Session created:', sid, '→ conv', convId);
+        } else {
+          console.warn(
+            '[ws] session_created without pending conv id',
+            { sid, convId }
+          );
         }
-        // Reset the event index for this brand-new session
-        activeEventIndexRef.current = 0;
-        if (researchConvIdRef.current) {
-          setEventIndex(researchConvIdRef.current, 0);
-        }
-        console.log('[ws] Session created:', rawMessage.session_id);
         break;
+      }
 
       case 'session_resumed': {
+        const sid = rawMessage.session_id as string | undefined;
         const totalEvents = rawMessage.event_count ?? 0;
-        console.log('[ws] Session resumed:', rawMessage.session_id, '— total events:', totalEvents);
-        // Restore session refs that may have been lost on a hard page refresh
-        // or browser re-open.
-        if (rawMessage.session_id) {
-          activeSessionIdRef.current = rawMessage.session_id;
+        console.log('[ws] Session resumed:', sid, '— total events:', totalEvents);
+        if (sid) {
+          currentSessionIdRef.current = sid;
         }
-        const storedConvId = localStorage.getItem(LS_CONV_ID);
-        if (!researchConvIdRef.current && storedConvId) {
-          researchConvIdRef.current = storedConvId;
+        // Locate the conversation that owns this session.  On a hard-refresh
+        // resume the sessionId is already stored on the conversation, so
+        // ``findConvBySessionId`` succeeds.  If we can't find one, the
+        // session is orphaned (e.g. localStorage was cleared) — log and
+        // drop the events on the floor rather than corrupting an unrelated
+        // conversation.
+        const resumedConvId = sid ? findConvBySessionId(sid) : null;
+        if (!resumedConvId) {
+          console.warn('[ws] session_resumed for unknown session id', sid);
+          break;
         }
         // Decide how many replay events to suppress.  Events with an index
         // below the storedEventIndex are already in localStorage and should
         // NOT produce duplicate messages.  Events above it are new (emitted
         // while the browser was closed) and MUST flow through normally.
-        const storedIndex = researchConvIdRef.current
-          ? getEventIndex(researchConvIdRef.current)
-          : 0;
+        const storedIndex = getEventIndex(resumedConvId);
         const eventsToSuppress = Math.min(storedIndex, totalEvents);
         replayCountRef.current = eventsToSuppress;
         replayTotalRef.current = totalEvents;
@@ -266,23 +326,19 @@ const AppContent: React.FC = () => {
         setCurrentStatus(
           rawMessage.complete ? 'Research Complete' : 'Reconnected — resuming…'
         );
-        // Keep the researching flag true during resume if the session is
-        // still live (so the UI shows the spinner / control bar).
         if (!rawMessage.complete) {
           setIsResearching(true);
         }
         // Notify the user that we've reconnected successfully.
-        if (researchConvIdRef.current) {
-          addMessageToConv(researchConvIdRef.current, {
-            id: generateId(),
-            role: 'system',
-            type: 'system',
-            content: rawMessage.complete
-              ? '🔄 Reconnected. Research had already finished — replaying results.'
-              : '🔄 Reconnected to backend. Resuming research in progress…',
-            timestamp: new Date(),
-          });
-        }
+        addMessageToConv(resumedConvId, {
+          id: generateId(),
+          role: 'system',
+          type: 'system',
+          content: rawMessage.complete
+            ? '🔄 Reconnected. Research had already finished — replaying results.'
+            : '🔄 Reconnected to backend. Resuming research in progress…',
+          timestamp: new Date(),
+        });
         break;
       }
 
@@ -290,9 +346,11 @@ const AppContent: React.FC = () => {
         console.log('Status update:', message);
         setCurrentStatus(message || data?.message || 'Researching');
 
+        if (!owningConvId) break;
+
         // Graph: explicit batch data from the v2 orchestrator
         if (data?.batches) {
-          overrideBatches(researchConvIdRef.current!, data.batches);
+          overrideBatches(owningConvId, data.batches);
         }
         // Graph: parse sub-agent progress lines emitted by the orchestrator
         if (message) {
@@ -300,31 +358,31 @@ const AppContent: React.FC = () => {
           // Matches both initial gather and targeted re-search
           const searchMatch = message.match(/\[Search\].*step\s+(\d+)/i);
           if (searchMatch) {
-            updateSubAgent(researchConvIdRef.current!, parseInt(searchMatch[1], 10), 'search', 'running');
+            updateSubAgent(owningConvId, parseInt(searchMatch[1], 10), 'search', 'running');
           }
           // [Analyst] any message for step N → search completed, analyst running
           // Matches both "Extracting claims" and "Re-extracting claims"
           const analystMatch = message.match(/\[Analyst\].*step\s+(\d+)/i);
           if (analystMatch) {
-            updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'search', 'completed');
-            updateSubAgent(researchConvIdRef.current!, parseInt(analystMatch[1], 10), 'analyst', 'running');
+            updateSubAgent(owningConvId, parseInt(analystMatch[1], 10), 'search', 'completed');
+            updateSubAgent(owningConvId, parseInt(analystMatch[1], 10), 'analyst', 'running');
           }
           // [QA] Auditing → analyst completed, QA running
           const qaAuditMatch = message.match(/\[QA\] Auditing.*step\s+(\d+)/i);
           if (qaAuditMatch) {
-            updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'analyst', 'completed');
-            updateSubAgent(researchConvIdRef.current!, parseInt(qaAuditMatch[1], 10), 'qa', 'running');
+            updateSubAgent(owningConvId, parseInt(qaAuditMatch[1], 10), 'analyst', 'completed');
+            updateSubAgent(owningConvId, parseInt(qaAuditMatch[1], 10), 'qa', 'running');
           }
           // [QA] contradiction(s) flagged → attach contradiction data
           const qaFlagMatch = message.match(/\[QA\].*contradiction.*step\s+(\d+)/i);
           if (qaFlagMatch) {
-            addContradictions(researchConvIdRef.current!, parseInt(qaFlagMatch[1], 10), data?.contradictions ?? []);
+            addContradictions(owningConvId, parseInt(qaFlagMatch[1], 10), data?.contradictions ?? []);
           }
           // [QA retry N/N] → increment retry badge; search/analyst transitions
           // are handled by the subsequent [Search] and [Analyst] messages above
           const qaRetryMatch = message.match(/\[QA retry.*?\].*step\s+(\d+)/i);
           if (qaRetryMatch) {
-            incrementQaRetries(researchConvIdRef.current!, parseInt(qaRetryMatch[1], 10));
+            incrementQaRetries(owningConvId, parseInt(qaRetryMatch[1], 10));
           }
           // Synthesis phases starting — synthesis node is already running
           // (set to running in the research_complete handler below)
@@ -336,15 +394,13 @@ const AppContent: React.FC = () => {
         setCurrentStatus('Planning');
         setIsResearching(false);
         setPlanStatus('pending');
-
-        // Build initial graph from the incoming plan only for live events;
-        // during replay the graph is already restored from localStorage.
+        if (!owningConvId) break;
         if (plan && !isReplayedEvent) {
-          initFromPlan(researchConvIdRef.current!, plan);
+          initFromPlan(owningConvId, plan);
         }
-
+        setSessionState(owningConvId, 'awaiting_approval');
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'plan_approval',
@@ -364,34 +420,39 @@ const AppContent: React.FC = () => {
         setPlanStatus('denied');
         setIsResearching(false);
         setCurrentStatus('Plan Denied');
-        activeSessionIdRef.current = null;
-        localStorage.removeItem(LS_SESSION_ID);
-        localStorage.removeItem(LS_CONV_ID);
-        resetResearch();
-        resetGraph(researchConvIdRef.current!);
-
-        if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
-            id: generateId(),
-            role: 'assistant',
-            type: 'system',
-            content: 'The research plan was denied. Please submit a new query to start again.',
-            timestamp: new Date(),
-          });
+        if (owningConvId) {
+          setSessionState(owningConvId, 'denied');
+          setSessionId(owningConvId, null);
+          resetGraph(owningConvId);
+          if (!isReplayedEvent) {
+            addMessageToConv(owningConvId, {
+              id: generateId(),
+              role: 'assistant',
+              type: 'system',
+              content: 'The research plan was denied. Please submit a new query to start again.',
+              timestamp: new Date(),
+            });
+          }
         }
+        currentSessionIdRef.current = null;
+        resetResearch();
         break;
 
       case 'step_start':
         console.log('Starting step:', data?.step);
         setIsResearching(true);
         setCurrentStatus('Starting Step: ' + (data?.step?.name || 'Unknown Step'));
+        if (!owningConvId) break;
+        // First step_start also marks the session as executing so the state
+        // survives a restart and drives the recovery path in the backend.
+        setSessionState(owningConvId, 'executing');
         // Graph: mark this node as running
         if (data?.step?.id != null) {
-          setNodeRunning(researchConvIdRef.current!, data.step.id);
+          setNodeRunning(owningConvId, data.step.id);
         }
 
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'step_start',
@@ -405,17 +466,18 @@ const AppContent: React.FC = () => {
       case 'step_complete':
         console.log('Completed step:', data?.step);
         setCurrentStatus('Step Completed: ' + (data?.step?.name || 'Unknown Step'));
+        if (!owningConvId) break;
         // Graph: mark node completed, attach result & tools
         if (data?.step?.id != null) {
           setNodeCompleted(
-            researchConvIdRef.current!,
+            owningConvId,
             data.step.id,
             data.step.result,
             Array.isArray(data.tools_used) ? data.tools_used : undefined
           );
         }
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'step_complete',
@@ -433,12 +495,13 @@ const AppContent: React.FC = () => {
         const stepError = rawMessage.error;
         console.log('Step failed:', message, 'Error:', stepError);
         setCurrentStatus('Step Failed');
+        if (!owningConvId) break;
         // Graph: mark node failed
         if (data?.step?.id != null) {
-          setNodeFailed(researchConvIdRef.current!, data.step.id, stepError ?? undefined);
+          setNodeFailed(owningConvId, data.step.id, stepError ?? undefined);
         }
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'step_failed',
@@ -460,17 +523,18 @@ const AppContent: React.FC = () => {
         console.log('Research complete:', data);
         setIsResearching(false);
         setCurrentStatus('Complete');
+        if (!owningConvId) break;
         // Freeze the timer — pipeline is done
-        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        setResearchEndTime(owningConvId, new Date().toISOString());
         // Add the synthesis node and mark it running only for live events;
         // during replay the graph node already exists in localStorage.
         if (!isReplayedEvent) {
-          addSynthesisNode(researchConvIdRef.current!);
-          setNodeRunning(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
+          addSynthesisNode(owningConvId);
+          setNodeRunning(owningConvId, SYNTHESIS_NODE_ID);
         }
-        // Session is still alive until 'report' arrives; keep activeSessionIdRef.
+        // Session stays alive (state="executing") until 'report' arrives.
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'research_complete',
@@ -493,8 +557,8 @@ const AppContent: React.FC = () => {
         if (data?.creative_applications?.length) synthParts.push(`## Creative Applications\n${(data.creative_applications as string[]).map((a: string) => `- ${a}`).join('\n')}`);
         if (data?.knowledge_gaps?.length) synthParts.push(`## Knowledge Gaps\n${(data.knowledge_gaps as string[]).map((g: string) => `- ${g}`).join('\n')}`);
         const formattedSummary = synthParts.join('\n\n') || data?.summary || message || 'No synthesis data available.';
-        if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+        if (!isReplayedEvent && owningConvId) {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'synthesis',
@@ -521,16 +585,16 @@ const AppContent: React.FC = () => {
         console.error('Error received:', message, data);
         setIsResearching(false);
         setCurrentStatus('Step Failed');
-        // If the error came from a failed resume attempt, clear the stored
-        // session so we don't keep retrying on the next page load.
-        localStorage.removeItem(LS_SESSION_ID);
-        localStorage.removeItem(LS_CONV_ID);
-        activeSessionIdRef.current = null;
-        if (researchConvIdRef.current) {
-          setResearchEndTime(researchConvIdRef.current, new Date().toISOString());
+        // Terminal state — clear the session binding for the owning conv so
+        // future page loads don't attempt to resume a finished session.
+        if (owningConvId) {
+          setSessionState(owningConvId, 'error');
+          setSessionId(owningConvId, null);
+          setResearchEndTime(owningConvId, new Date().toISOString());
         }
-        if (!isReplayedEvent && researchConvIdRef.current) {
-          addMessageToConv(researchConvIdRef.current, {
+        currentSessionIdRef.current = null;
+        if (!isReplayedEvent && owningConvId) {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'error',
@@ -562,17 +626,18 @@ const AppContent: React.FC = () => {
         console.log('Received research report:', data);
         setIsResearching(false);
         setCurrentStatus('Report Ready');
-        // Session is fully complete — clear stored IDs so future page loads
-        // do not attempt to resume a finished session.
-        activeSessionIdRef.current = null;
-        localStorage.removeItem(LS_SESSION_ID);
-        localStorage.removeItem(LS_CONV_ID);
+        if (!owningConvId) break;
+        // Terminal state — mark session complete and clear its id so future
+        // page loads don't try to resume a finished session.
+        setSessionState(owningConvId, 'complete');
+        setSessionId(owningConvId, null);
+        currentSessionIdRef.current = null;
         // Mark the synthesis graph node as completed
-        setNodeCompleted(researchConvIdRef.current!, SYNTHESIS_NODE_ID);
+        setNodeCompleted(owningConvId, SYNTHESIS_NODE_ID);
         // Timer: mark end time
-        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        setResearchEndTime(owningConvId, new Date().toISOString());
         if (!isReplayedEvent) {
-          addMessageToConv(researchConvIdRef.current!, {
+          addMessageToConv(owningConvId, {
             id: generateId(),
             role: 'assistant',
             type: 'report',
@@ -606,12 +671,14 @@ const AppContent: React.FC = () => {
         console.log('Research stopped acknowledged:', message);
         setIsResearching(false);
         setCurrentStatus('');
-        activeSessionIdRef.current = null;
-        localStorage.removeItem(LS_SESSION_ID);
-        localStorage.removeItem(LS_CONV_ID);
-        setResearchEndTime(researchConvIdRef.current!, new Date().toISOString());
+        if (owningConvId) {
+          setSessionState(owningConvId, 'cancelled');
+          setSessionId(owningConvId, null);
+          setResearchEndTime(owningConvId, new Date().toISOString());
+          resetGraph(owningConvId);
+        }
+        currentSessionIdRef.current = null;
         resetResearch();
-        resetGraph(researchConvIdRef.current!);
         break;
 
       // ── Self-optimization workflow ──────────────────────────────────────
@@ -674,21 +741,20 @@ const AppContent: React.FC = () => {
     }
 
     // ── Post-batch bookkeeping ───────────────────────────────────────
-    // If a replay was in progress and all events have been drained,
-    // persist the final total so future reconnects are accurate.
+    // Persist the event index against whichever conversation owns the
+    // session that just produced this event.  Uses ``owningConvId`` (looked
+    // up once at the top of this effect) so bookkeeping stays consistent
+    // even after control events cleared ``currentSessionIdRef``.
     if (
       pendingTotalEventsRef.current > 0 &&
       replayTotalRef.current === 0 &&
-      researchConvIdRef.current
+      owningConvId
     ) {
-      setEventIndex(researchConvIdRef.current, pendingTotalEventsRef.current);
+      setEventIndex(owningConvId, pendingTotalEventsRef.current);
       pendingTotalEventsRef.current = 0;
     }
-
-    // Flush the running event index to conversation metadata every
-    // event so the persisted index is always up-to-date.
-    if (researchConvIdRef.current) {
-      setEventIndex(researchConvIdRef.current, activeEventIndexRef.current);
+    if (owningConvId) {
+      setEventIndex(owningConvId, activeEventIndexRef.current);
     }
   }, [
     messageCount,
@@ -715,7 +781,7 @@ const AppContent: React.FC = () => {
     updateOptimizePhase,
     getEventIndex,
     setEventIndex,
-    // researchConvIdRef / optimizeConvIdRef / replayTotalRef /
+    // currentSessionIdRef / pendingQueryConvIdRef / replayTotalRef /
     // pendingTotalEventsRef / activeEventIndexRef are refs;
     // no need to list them
   ]);
@@ -764,8 +830,10 @@ const AppContent: React.FC = () => {
         const newConv = createConversation();
         convId = newConv.id;
       }
-      researchConvIdRef.current = convId;
-      localStorage.setItem(LS_CONV_ID, convId);
+      // Track which conversation issued this query so the next
+      // ``session_created`` reply can be bound to it (see the handler for
+      // ``session_created`` above).  This must be set BEFORE ``sendMessage``.
+      pendingQueryConvIdRef.current = convId;
 
       addMessageToConv(convId, {
         id: generateId(),
@@ -843,9 +911,9 @@ const AppContent: React.FC = () => {
       });
 
       // Graph: mark plan node as approved
-      updatePlanAction(researchConvIdRef.current!, 'approved');
+      updatePlanAction(activeConversationId!, 'approved');
       // Timer: record when execution started
-      setResearchStartTime(researchConvIdRef.current!, new Date().toISOString());
+      setResearchStartTime(activeConversationId!, new Date().toISOString());
 
       setPlanStatus('approved');
       setIsResearching(true);
@@ -879,7 +947,7 @@ const AppContent: React.FC = () => {
       });
 
       // Graph: mark current plan node as being modified (amber / running)
-      updatePlanAction(researchConvIdRef.current!, 'modified');
+      updatePlanAction(activeConversationId!, 'modified');
 
       setPlanStatus('pending');
       setIsResearching(true);
@@ -910,7 +978,7 @@ const AppContent: React.FC = () => {
       });
 
       // Graph: mark plan node as denied
-      updatePlanAction(researchConvIdRef.current!, 'denied');
+      updatePlanAction(activeConversationId!, 'denied');
 
       setPlanStatus('denied');
       setIsResearching(false);

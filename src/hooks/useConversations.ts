@@ -165,6 +165,46 @@ export function useConversations() {
     [conversations]
   );
 
+  const setSessionId = useCallback(
+    (conversationId: string, sessionId: string | null) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                sessionId: sessionId ?? undefined,
+                updatedAt: new Date(),
+              }
+            : c
+        )
+      );
+    },
+    []
+  );
+
+  const setSessionState = useCallback(
+    (conversationId: string, state: Conversation['sessionState']) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, sessionState: state, updatedAt: new Date() }
+            : c
+        )
+      );
+    },
+    []
+  );
+
+  /** Return the id of the conversation currently associated with the given
+   *  backend session, or ``null`` if no conversation owns that session. */
+  const findConvBySessionId = useCallback(
+    (sessionId: string): string | null => {
+      const match = conversations.find((c) => c.sessionId === sessionId);
+      return match?.id ?? null;
+    },
+    [conversations]
+  );
+
   return {
     conversations,
     activeConversationId,
@@ -178,5 +218,8 @@ export function useConversations() {
     updateMessageInConversation,
     setEventIndex,
     getEventIndex,
+    setSessionId,
+    setSessionState,
+    findConvBySessionId,
   };
 }
