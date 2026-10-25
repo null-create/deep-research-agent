@@ -48,7 +48,7 @@ services:
         condition: service_healthy
 
   neo4j:
-    image: neo4j:5.26-community
+    image: neo4j:2026.09-community
     container_name: research-neo4j
     ports:
       - "7474:7474"
@@ -89,7 +89,7 @@ services:
     networks:
       - research-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9393/health" ]
+      test: ["CMD", "curl", "-f", "http://localhost:9393/health"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -106,7 +106,7 @@ services:
     networks:
       - research-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9292/health" ]
+      test: ["CMD", "curl", "-f", "http://localhost:9292/health"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -125,7 +125,7 @@ services:
     networks:
       - research-network
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9191/health" ]
+      test: ["CMD", "curl", "-f", "http://localhost:9191/health"]
       interval: 5s
       timeout: 3s
       retries: 10
